@@ -1,0 +1,304 @@
+// Package app — zcode2api (zcode-hub) Go 版。
+//
+// 上游常量收口 —— 所有与 zcode/zai/bigmodel 上游相关的 URL、模型名、判定关键字集中在此。
+//
+// 约定（docs/development/06-dev-guide.md）：
+//   - 模块代码禁止再硬编码上游 URL / 模型名 / 关键字，一律引用本文件。
+//   - 改动任何常量必须先在 tests 补断言，防止无意漂移。
+//   - 值均来自源码实证，出处标注见 docs/development/05-upstream-protocols.md。
+//
+// 对齐 Python app/constants.py：模块级可变全局（CLIENT_APP_VERSION 等）收敛到
+// versionState（读写锁保护），访问走 Getter；SetActiveVersion 对齐 set_active_version。
+package app
+
+import (
+	"os"
+	"strings"
+	"sync"
+)
+
+// ── 上游 origin ──────────────────────────────────────────────────────────────
+// Plan 通道（JWT + 验证码）：zcode.z.ai 的 coding-plan 代理端点
+const (
+	ZCODE_ORIGIN   = "https://zcode.z.ai"
+	// API Key 通道（回退 / bigmodel 同形）：api.z.ai 的 anthropic 兼容端点
+	ZAI_API_ORIGIN = "https://api.z.ai"
+	// bigmodel（智谱开放平台）anthropic 兼容端点
+	BIGMODEL_ORIGIN = "https://open.bigmodel.cn"
+)
+
+// ── messages 端点（settings.UPSTREAM 的默认值来源）────────────────────────────
+var MESSAGES_PATHS = map[string]string{
+	// zai + jwt（Plan 通道，需 X-Aliyun-Captcha-Verify-Param）
+	"zai": "/api/v1/zcode-plan/anthropic/v1/messages",
+	// zai + apiKey 回退通道（免验证码）
+	"zai_fallback": "/api/anthropic/v1/messages",
+	"bigmodel":     "/api/anthropic/v1/messages",
+}
+
+var MESSAGES_URLS = map[string]string{
+	"zai":          ZCODE_ORIGIN + MESSAGES_PATHS["zai"],
+	"zai_fallback": ZAI_API_ORIGIN + MESSAGES_PATHS["zai_fallback"],
+	"bigmodel":     BIGMODEL_ORIGIN + MESSAGES_PATHS["bigmodel"],
+}
+
+// ── 计费 / 额度端点（quota.go / claim.go）──────────────────────────────────────
+const (
+	BILLING_BASE = ZCODE_ORIGIN + "/api/v1/zcode-plan"
+	// WAF 风险点：billing/* 连续查询易触发拦截，轮询必须错峰（docs 05 §风险控制）
+	BILLING_CURRENT_PATH = "/billing/current"
+	BILLING_BALANCE_PATH = "/billing/balance"
+	USAGE_PATH           = "/usage"
+
+	// Coding 平面额度：api.z.ai 自有端点（与 billing 族是两套独立账本）。
+	// 鉴权用 `authorization: <api_key>`（裸值，无 Bearer，也不是 JWT）。
+	// 2026-11-02 实测：体验套餐号返回 {"code":500,"msg":"当前用户不存在coding plan"}。
+	CODING_LIMIT_URL = ZAI_API_ORIGIN + "/api/monitor/usage/quota/limit"
+
+	// ── OAuth ────────────────────────────────────────────────────────────────
+	OAUTH_CLI_INIT_PATH = "/api/v1/oauth/cli/init"
+	OAUTH_CLI_POLL_PATH = "/api/v1/oauth/cli/poll" // + /{flow_id}
+)
+
+// ── 客户端版本（单一真相源：官方客户端 3.17.1，2026-11-03 跟进）────────────────
+// 客户端 claim 头实测缺版本/平台头 → 上游 3007；client/configs 带 platform 参数 → 3001
+// 出处：2026-11-03 本机官方客户端（CFBundleShortVersionString 3.17.1，内部版本 3.17.1.9553；
+// asar bundle En="3.17.1"）。前值 3.16.3（2026-10-29）、3.14.4（2026-10-02）。
+// zcode-switch 在 Windows 上经 `zcode_app_version()` 读注册表本机真实版去打
+// billing（官方升版即自动跟进）；hub 跑 Linux 无注册表，静态基线钉此处，
+// 运行期由 version_tracker 轮询官方 manifest 接口自动更新活跃版本。
+// ⚠️ 上游按客户端版本门槛投放活动套餐：2026-11-03 实测旧版（3.16.3）打 claim 报
+// 1004「不符合领取条件（no permission）」，跟进 3.17.1 立即成功领取 3 亿 token。
+// 发现 preview 为空或 1004 时优先核对此常量是否落后于官方客户端。
+const (
+	DEFAULT_CLIENT_APP_VERSION = "3.17.1"
+	CLIENT_PLATFORM            = "darwin-arm64" // asar TH() = process.platform-arch，服务端固定伪装
+	// bundle 实证（3.17.1）：安装/遥测序仍走 /api/v1/client/configs?app_version=…；
+	// mitm 另见 /api/v1/agent/configs（运行时配置通道，无参数），两者并存勿混。
+	CLIENT_CONFIGS_URL = ZCODE_ORIGIN + "/api/v1/client/configs"
+)
+
+// ── 官方更新清单端点（2026-11-03 官方桌面端逆向实证）────────────────────────────
+// 官方客户端检查更新直连端点，返回 YAML 格式的最新版本、发布时间与原生 Markdown 更新日志
+const (
+	ELECTRON_MANIFEST_PATH = "/api/v1/releases/electron/manifest"
+	ELECTRON_MANIFEST_URL  = ZCODE_ORIGIN + ELECTRON_MANIFEST_PATH + "?platform=darwin-aarch64&channel=1"
+
+	// ── 营销触达 / 活动投放端点（2026-11-03 官方客户端逆向实证）───────────────────────
+	// 官方活动套餐（如 zcode-v3-start-plan-MMDD）经由此服务（marketing-touch）下发，
+	// 常规 billing/preview 端点保持为空。返回 deliveries[].banner/popup 中包含
+	// action.type="claim_zcode_plan" 及 args.zcode_plan。
+	MARKETING_TOUCH_PATH = "/api/v1/marketing/touch"
+	MARKETING_TOUCH_URL  = ZCODE_ORIGIN + MARKETING_TOUCH_PATH
+
+	// ── billing 族版本 / 激活上报（zcode-switch v1.5.4 实证，2026-09-06 移植）─────
+	// billing 族（preview/claim/balance/current/usage/configs/event）用官方桌面端
+	// 现行版（对齐 zcode-switch Windows 路径读到的本机真实版；hub 钉常量，见上）
+	BILLING_TITLE          = "Z Code@electron"   // bundle：sourceTitle 缺省即 electron（CLI surface 才覆盖 cli）
+	BILLING_RELEASE_CHANNEL = "production"       // bundle DF()：恒 production（ZCODE_ENV=test 才 test）
+	// 官方客户端每日活跃事件：POST /api/v1/event/report（不在 zcode-plan 下、无
+	// Authorization）。zcode-switch claim_refresh 在 preview 前上报 app_launch +
+	// app_daily_active —— 疑似活动套餐投放的资格信号（官方客户端可见活动而纯
+	// billing 轮询号 preview 为空的差异点）。
+	EVENT_REPORT_URL = ZCODE_ORIGIN + "/api/v1/event/report"
+
+	// 激活事件序列对齐 Python ACTIVATION_ELEMENTS 元组，见 ActivationElements()。
+	ACTIVATION_SCREEN_RESOLUTION = "2560x1440"
+)
+
+// ActivationElements 返回官方客户端激活事件序列（app_launch → app_daily_active）。
+// Python 源为 tuple 常量，此处以切片形式暴露（零值安全的只读副本）。
+func ActivationElements() []string {
+	return []string{"app_launch", "app_daily_active"}
+}
+
+// ── 验证码默认配置（client/configs 拉取失败时的兜底；region 实测线上为 cn）────
+// skip_model_request 缺省 False：官方无配置时按「模型请求也要验证码」处理
+func CaptchaDefaults() map[string]any {
+	return map[string]any{
+		"enabled":            true,
+		"prefix":             "no8xfe",
+		"region":             "cn",
+		"sceneId":            "11xygtvd",
+		"skip_model_request": false,
+	}
+}
+
+// ── 模型名 ───────────────────────────────────────────────────────────────────
+// Z.AI 上游模型名大小写敏感；客户端传小写别名时映射到官方名（gateway MODEL_NAME_MAP）
+//
+// 2026-10-30 实测：套餐只放行 GLM-5.3 系，GLM-5.2 / GLM-5-Turbo / GLM-5.1 / GLM-4.7
+// 一律 400 code 3006「model not allowed」——它们是**已退役别名**，不是拼写别名。
+// 老客户端（Claude Code 配置、第三方 SDK 默认 GLM-5.2）会固定带这些名字，若原样
+// 透传，客户端拿到的是上游 3006 而网关没有任何可用模型，等于「用一个合规请求换一个
+// 必然失败的响应」。因此退役名统一改写到当前主力型号（GLM-5.3），保留大小写别名。
+var (
+	RETIRED_MODEL_ALIASES = map[string]string{
+		"GLM-5.2":     "GLM-5.3",
+		"GLM-5-Turbo": "GLM-5.3",
+		"GLM-5.1":     "GLM-5.3",
+		"GLM-4.7":     "GLM-5.3",
+	}
+	MODEL_NAME_MAP = map[string]string{
+		"glm-5.3-flash": "GLM-5.3-Flash",
+		"glm-5.3":       "GLM-5.3",
+		"glm-5.2":       "GLM-5.3",
+		"glm-5-turbo":   "GLM-5.3",
+		"glm-turbo":     "GLM-5.3",
+		"glm-5.1":       "GLM-5.3",
+		"glm-4.7":       "GLM-5.3",
+	}
+	// /v1/models 对外公布（按账号套餐实际窗口：2026-10-30 实测只有 5.3 系可用）
+	AVAILABLE_MODELS = []string{"GLM-5.3-Flash", "GLM-5.3"}
+)
+
+// 上游 max_tokens 合法范围（2026-09-06 实测：超限报 400 code 1210
+// 「max_tokens参数非法：限制数值范围[1,131072]」，客户端（如 auto-compact 续传）
+// 可能带更大的值，网关统一钳制）
+const MAX_TOKENS_LIMIT = 131072
+
+// ── 请求头 ───────────────────────────────────────────────────────────────────
+const (
+	ANTHROPIC_VERSION = "2023-06-01"
+	X_ZCODE_AGENT     = "glm"
+)
+
+// 无尾斜杠：与 zcode-switch（billing 实证形态）及本服务 billing 头统一，
+// 消除 messages/billing 通道间 Referer 形状抖动
+const (
+	HTTP_REFERER         = "https://zcode.z.ai"
+	CAPTCHA_HEADER       = "X-Aliyun-Captcha-Verify-Param"
+	// region 头（zapi captcha.ts REGION_HEADER；与 PARAM 成对下发，缺失易 3007）
+	CAPTCHA_REGION_HEADER = "X-Aliyun-Captcha-Verify-Region"
+)
+
+// ── 身份头仿真（对齐 zapi identity.ts 的 pio；顺序、取值逐字段镜像官方客户端）──
+// 官方客户端 companion 头集合，让代理在指纹层与官方 ZCode 桌面端不可区分。
+// darwin-arm64 桌面身份。X-Device-Mid 走 quota.device_mid() 持久化复用。
+const (
+	IDENTITY_TITLE           = "Z Code@electron" // X-Title = "Z Code@{sourceTitle}"；桌面端账号走 electron
+	IDENTITY_RELEASE_CHANNEL = "production"      // 同 BILLING_RELEASE_CHANNEL（bundle DF() 实证）
+	IDENTITY_CLIENT_LANGUAGE = "zh-CN"
+	IDENTITY_CLIENT_TIMEZONE = "Asia/Shanghai"
+	// X-Os-Category：darwin→macos / win32→windows / 其它→linux
+	IDENTITY_OS_CATEGORY = "macos"
+	// X-Os-Version：os.release() 语义；darwin 25.x 对应 macOS 26（本机实测 25.6.0）。
+	// 固定伪装值。
+	IDENTITY_OS_VERSION = "25.6.0"
+)
+
+// ── 上游被拒信号 → 账号动作（gateway / quota 判定共用）────────────────────────
+var (
+	EXHAUST_HTTP_STATUSES = []int{402}
+	// 额度耗尽信号。2026-10-31 复盘：原实现是**裸子串**匹配 "quota"，任何含该词的
+	// 文案（含风控/验证码页）都会被判成「额度用完」而把号踢成 EXHAUSTED——比漏判更糟。
+	// 改为 ① 业务码（Plan 通道 {"code":1005,"msg":"exceed quota limit"} 实测形态）
+	//      ② 定量短语（完整词 + 明确的无额度语义），不再用裸词。
+	EXHAUST_BUSINESS_CODES = []int{1005, 1113} // 1005 exceed quota limit / 1113 无余额
+	EXHAUST_KEYWORDS       = []string{
+		"exceed quota", "quota limit", "quota exceeded", "quota exhausted",
+		"insufficient balance", "insufficient quota", "no balance",
+		"额度已用完", "额度用完", "额度不足", "余额不足", "余额已用完", "无余额",
+	}
+	// 验证码挑战：HTTP 403 + 文案，或 HTTP 400 + body {"code":3007}（docs 05 §被拒信号表）
+	// 注意：403 不再无条件判 invalid —— 需先排除验证码挑战（captcha/verify 文案或
+	// challenge 头），否则一次人机校验续期就把账号错杀成 INVALID（对齐 zapi
+	// classifyAccountFailure：403 + captcha 文案 → 非账号失败）。
+	CAPTCHA_BODY_MARKERS = []string{`"code":3007`, `"code": 3007`}
+
+	// ── 风控信号（2026-09-05 3012 事件实证）────────────────────────────────────────
+	// 3012「unusual activity」= 上游风控（HTTP 405 承载），不在官方公开错误码表；
+	// 高频请求触发，官方政策定性为临时限制（限流/冻结，3 次以上违规才封号）。
+	// 处置：账号指数退避冷却 + 暂停验证码池预热（池预热本身即上游流量，会加剧风控）。
+	RISK_CONTROL_HTTP_STATUSES = []int{405}
+	RISK_BUSINESS_CODE         = 3012
+	// 429 承载的「模型并发已满」（2026-11-02 实测 {"code":3009,"msg":"model
+	// concurrency limit exceeded"}）：并发争用是瞬态，短退避重试，不等 Retry-After。
+	// ⚠️ 判定必须解析业务码，不能用裸子串——响应体里的 logid 是 20 位随机数字，
+	// 裸子串 "3009" 会撞车（与 EXHAUST 裸子串教训同款，见上方 EXHAUST_KEYWORDS 注）。
+	CONCURRENCY_BUSINESS_CODE = 3009
+	RISK_CONTROL_MARKERS      = []string{
+		`"code":3012`, `"code": 3012`,
+		"unusual activity",
+	}
+)
+
+// ── 动态版本状态（Python 模块级全局的线程安全收敛）───────────────────────────
+type versionState struct {
+	mu                sync.RWMutex
+	clientAppVersion  string
+	billingAppVersion string
+	userAgent         string
+	xZcodeAppVersion  string
+	clientConfigsQ    string
+}
+
+var versions = &versionState{
+	clientAppVersion:  DEFAULT_CLIENT_APP_VERSION,
+	billingAppVersion: DEFAULT_CLIENT_APP_VERSION,
+	userAgent:         "ZCode/" + DEFAULT_CLIENT_APP_VERSION,
+	xZcodeAppVersion:  DEFAULT_CLIENT_APP_VERSION,
+	clientConfigsQ:    "app_version=" + DEFAULT_CLIENT_APP_VERSION,
+}
+
+// ClientAppVersion 对齐 constants.CLIENT_APP_VERSION。
+func ClientAppVersion() string {
+	versions.mu.RLock()
+	defer versions.mu.RUnlock()
+	return versions.clientAppVersion
+}
+
+// BillingAppVersion 对齐 constants.BILLING_APP_VERSION。
+func BillingAppVersion() string {
+	versions.mu.RLock()
+	defer versions.mu.RUnlock()
+	return versions.billingAppVersion
+}
+
+// UserAgent 对齐 constants.USER_AGENT。
+func UserAgent() string {
+	versions.mu.RLock()
+	defer versions.mu.RUnlock()
+	return versions.userAgent
+}
+
+// XZcodeAppVersion 对齐 constants.X_ZCODE_APP_VERSION。
+func XZcodeAppVersion() string {
+	versions.mu.RLock()
+	defer versions.mu.RUnlock()
+	return versions.xZcodeAppVersion
+}
+
+// ClientConfigsQuery 对齐 constants.CLIENT_CONFIGS_QUERY（"app_version=…"）。
+func ClientConfigsQuery() string {
+	versions.mu.RLock()
+	defer versions.mu.RUnlock()
+	return versions.clientConfigsQ
+}
+
+// SetActiveVersion 动态更新客户端与 billing 伪装版本号（当自动探测发现新版本时）。
+//
+// 规范化：剥离首尾空白与前导 v/V——官方 CFBundleShortVersionString 与
+// X-ZCode-App-Version 头均为纯数字形态，"v3.17.2" 会使 UA 变成
+// "ZCode/v3.17.2" 产生指纹漂移。
+//
+// 对齐 Python set_active_version：无 env 覆盖（UPSTREAM_USER_AGENT）时同步刷新
+// settings.USER_AGENT（此处经 settings.SyncUserAgentFromConstants）。
+func SetActiveVersion(newVersion string) {
+	v := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(newVersion), "vV"))
+	// 注意：Python 实现是 lstrip("vV")（可剥多个 v/V），且仅剥左侧；逐字对齐
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return
+	}
+	versions.mu.Lock()
+	versions.clientAppVersion = v
+	versions.billingAppVersion = v
+	versions.userAgent = "ZCode/" + v
+	versions.xZcodeAppVersion = v
+	versions.clientConfigsQ = "app_version=" + v
+	versions.mu.Unlock()
+	if os.Getenv("UPSTREAM_USER_AGENT") == "" {
+		settingsSyncUserAgent(UserAgent())
+	}
+}
