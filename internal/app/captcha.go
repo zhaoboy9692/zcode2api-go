@@ -102,6 +102,15 @@ func newCaptchaManager() *CaptchaManager {
 
 // ── 出口 ─────────────────────────────────────────────────────────────────────
 
+// maskedEgressTag 出口标签脱敏：direct/proxy 语义标签原样；代理 URL 形态
+// （账号级代理，含账密）打码密码后输出，杜绝凭据落日志。
+func maskedEgressTag(tag string) string {
+	if tag == EgressDirect || tag == EgressProxy {
+		return tag
+	}
+	return MaskProxySecret(tag)
+}
+
 // HotEgress 预热哪个出口的池：默认跟随 messages 上游的实际出口。
 //
 // 只有 messages 是热路径（每次请求都要验证码）；claim 一小时一轮，
@@ -480,7 +489,7 @@ func (m *CaptchaManager) solveOne(config map[string]any, tag string) (*captchaTo
 		lastErr = err
 		if param != "" {
 			if attempt > 1 {
-				LogOK("captcha", fmt.Sprintf("求解成功（第 %d 次尝试，出口=%s）", attempt, tag))
+				LogOK("captcha", fmt.Sprintf("求解成功（第 %d 次尝试，出口=%s）", attempt, maskedEgressTag(tag)))
 			}
 			return &captchaToken{param: param, region: region, bornAt: time.Now(), egress: tag}, nil
 		}
