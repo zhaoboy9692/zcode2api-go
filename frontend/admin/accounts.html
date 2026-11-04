@@ -242,7 +242,13 @@ const NOTCH_COLORS=['var(--notch-1)','var(--notch-2)','var(--notch-3)','var(--no
 
 function startPolling(){
   if(_timer)clearInterval(_timer);
-  _timer=setInterval(()=>{ if(!document.hidden && !anyModalOpen()) load(true); },5000);
+  _timer=setInterval(()=>{ if(!document.hidden && !anyModalOpen()) load(true); },3000);
+  // 切走时轮询暂停(不浪费),切回页面的瞬间立即补一次刷新——
+  // 否则回来看到的是离开前的旧数据,像"不会自动刷新"
+  document.addEventListener('visibilitychange',()=>{
+    if(!document.hidden && !anyModalOpen()) load(true);
+  });
+  window.addEventListener('focus',()=>{ if(!anyModalOpen()) load(true); });
 }
 function anyModalOpen(){return!!document.querySelector('.modal-overlay.open');}
 
