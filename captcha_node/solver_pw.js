@@ -45,10 +45,16 @@ if (memAvailableMB() < 500) {
   process.exit(7);
 }
 
-// ── Chromium 定位：env 优先，其次常见路径 ────────────────────────────────────
+// ── Chromium 定位：env 优先，其次各平台常见路径 ──────────────────────────────
 function findChromium() {
   const candidates = [
     process.env.ZCODE_CHROMIUM_PATH,
+    // macOS
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+    // Linux
     "/usr/local/bin/chromium",
     "/usr/local/bin/google-chrome",
     "/usr/bin/chromium",
@@ -94,7 +100,8 @@ const UA =
 
 const PAGE_URL = "file://" + path.join(__dirname, "page.html");
 
-// 内存紧张形态下的 Chromium 启动参数（pxed 实测唯一能跑通的组合）
+// Chromium 启动参数。Linux 小内存形态（--single-process 等，pxed 实测唯一能
+// 跑通的组合）只在 Linux 生效——macOS 上 --single-process 常导致启动崩溃。
 // proxyServer：无凭据的 --proxy-server 值（userinfo 由 page.authenticate 回填，
 // Chromium 的 --proxy-server 不接受也不解析凭据）
 function chromeArgs(proxyServer) {
@@ -103,13 +110,15 @@ function chromeArgs(proxyServer) {
     "--disable-blink-features=AutomationControlled",
     "--disable-features=site-per-process",
     "--lang=zh-CN",
-    "--single-process", "--no-zygote", "--renderer-process-limit=1",
     "--disable-gpu", "--disable-software-rasterizer", "--disable-extensions",
     "--disable-background-networking", "--disable-default-apps",
     "--disable-component-update", "--disable-sync", "--no-first-run",
     "--memory-pressure-off", "--disable-background-timer-throttling",
     "--disable-renderer-backgrounding", "--disable-backgrounding-occluded-windows",
   ];
+  if (process.platform === "linux") {
+    args.push("--single-process", "--no-zygote", "--renderer-process-limit=1");
+  }
   if (proxyServer) args.push("--proxy-server=" + proxyServer);
   return args;
 }
