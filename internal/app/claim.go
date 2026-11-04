@@ -769,13 +769,14 @@ func ClaimPlan(account *Account, planID string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	// claim 的 billing 请求走 trust_env=False 直连，验证码必须同样直连解，
-	// 否则 token 的出口与请求出口不一致，上游判 unusual activity。
-	verifyParam, verifyRegion, cerr := DefaultCaptchaManager.GetVerifyParam(EgressDirect)
+	// 验证码 token 的出口必须与 claim 请求同出口（billingRequest 走该账号生效的
+	// 代理：账号级 > 全局 ZCODE_UPSTREAM_PROXY，无则直连），否则上游判 unusual activity。
+	captchaTag := EgressTagForAccount(account)
+	verifyParam, verifyRegion, cerr := DefaultCaptchaManager.GetVerifyParam(captchaTag)
 	if cerr != nil {
 		return nil, cerr
 	}
-	config, _ := DefaultCaptchaManager.FetchConfig(EgressDirect)
+	config, _ := DefaultCaptchaManager.FetchConfig(captchaTag)
 	region := verifyRegion
 	if region == "" {
 		region = DictGetStr(config, "region", "")
@@ -794,7 +795,7 @@ func ClaimPlan(account *Account, planID string) (map[string]any, error) {
 		return claimOutcome(body, pid, planName, grants), nil
 	}
 	if code == 3007 {
-		DefaultCaptchaManager.Invalidate(EgressDirect) // 被拒的码出池，避免下轮复用
+		DefaultCaptchaManager.Invalidate(captchaTag) // 被拒的码出池，避免下轮复用
 	}
 	return nil, failError(code, body)
 }
