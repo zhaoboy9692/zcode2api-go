@@ -19,6 +19,8 @@
 package app
 
 import (
+	"encoding/json"
+	"runtime"
 	_ "embed"
 	"encoding/base64"
 	"fmt"
@@ -28,8 +30,38 @@ import (
 	"github.com/zhaoboy9692/zcode2api-go/internal/uuidx"
 )
 
+// zcodePrompt3172 是 ZCode 3.17.2 官方提示词资产(自喜鹊运行时插件导出,
+// zcode_prompt_3172.json),字段集与上游风控校验逐字节对齐。
+type ZcodePrompt3172 struct {
+	CliPrefix        string            `json:"cliPrefix"`
+	StableSections   []string          `json:"stableSections"`
+	DynamicBehavior  string            `json:"dynamicBehavior"`
+	SessionGuidance  string            `json:"sessionGuidance"`
+	ContextManagement string           `json:"contextManagement"`
+	PoweredBy        string            `json:"poweredBy"`
+	Environment      struct {
+		Heading             string `json:"heading"`
+		InvokedLine         string `json:"invokedLine"`
+		CwdLabel            string `json:"cwdLabel"`
+		GitLabel            string `json:"gitLabel"`
+		GitYes              string `json:"gitYes"`
+		GitNo               string `json:"gitNo"`
+		PlatformLabel       string `json:"platformLabel"`
+		ShellLabel          string `json:"shellLabel"`
+		OsVersionLabel      string `json:"osVersionLabel"`
+		UntrustedNote       string `json:"untrustedNote"`
+		PoweredByProvider   string `json:"poweredByProvider"`
+	} `json:"environment"`
+	Context struct {
+		CurrentDateLine string `json:"currentDateLine"`
+	} `json:"context"`
+}
+
 //go:embed zcode_system.json
 var zcodeSystemJSON []byte
+
+//go:embed zcode_prompt_3172.json
+var zcodePrompt3172JSON []byte
 
 // zcodeSystemBlocks 对齐 _ZCODE_SYSTEM_BLOCKS（解析失败 → 空表）。
 var zcodeSystemBlocks = func() []map[string]any {
@@ -49,6 +81,30 @@ var zcodeSystemBlocks = func() []map[string]any {
 	}
 	return out
 }()
+
+// zcodePrompt3172Loaded 运行时解析的新版提示词资产(nil = 加载失败,回退旧逻辑)。
+var zcodePrompt3172 = func() *ZcodePrompt3172 {
+	var out ZcodePrompt3172
+	if err := json.Unmarshal(zcodePrompt3172JSON, &out); err != nil {
+		return nil
+	}
+	return &out
+}()
+
+// HostPlatform / HostOSVersion 官方客户端形态的运行平台与版本(与指纹档案一致)。
+func HostPlatform() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "darwin"
+	case "windows":
+		return "win32"
+	}
+	return runtime.GOOS
+}
+
+func HostOSVersion() string {
+	return hostOSVersion()
+}
 
 // isPlainDict 对齐 _is_plain_dict。
 func isPlainDict(v any) bool {
@@ -94,60 +150,98 @@ func normalizeUserSystem(system any) []map[string]any {
 	return out
 }
 
-// ApplyStartPlanSystem 前置 ZCode 官方 system 身份块，并把 powered-by / 客户端 system 并入最后一块。幂等。
+// ApplyStartPlanSystem 按 ZCode 3.17.2 官方 dress 形态重排 system(幂等)。
 //
-// **严格三块**（2026-11-02 修正，此前为四块+，全池 3012）：
-//   - 网关校验的是 system 的**块结构**（cli_prefix 必须独立成首块），
-//     而非逐字内容——实测末块内容可任意（空串 / 仅前缀 / 无前缀均 200）。
-//   - 官方 harness 的 system 恰好 3 块，trial/start-plan 下外来 system 文本
-//     **只许并入末块内部**；追加成第 4 块、或把客户端 system 另起成独立块，
-//     都会破坏形态 → 405 3012 "unusual activity"。
-func ApplyStartPlanSystem(body map[string]any, model string) bool {
-	if len(zcodeSystemBlocks) == 0 {
+// **3.17.2 形态**(2026-11-05 起上游风控按提示词版本指纹判 405/3012,旧 3.14.3
+// 文本本身即是诱因,喜鹊 0.1.46+ 实证):
+//   - system[0] = cliPrefix(独立首块)
+//   - system[1] = stableSections 以 "\n\n" 连接
+//   - system[2] = "\n\n" + 动态段连接(dynamicBehavior → [sessionGuidance] →
+//     environment → [poweredBy] → contextManagement → 客户端自有 system),
+//     客户端 system 只许并入末块内部
+//   - 三块全部 cache_control: ephemeral
+//
+// place 的 dir/git 来自客户端 x-magpie-work-dir / x-magpie-work-git 头(无则省略);
+// environment 的 Platform/OS Version 是 hub 服务端平台(与官方客户端同机部署形态)。
+func ApplyStartPlanSystem(body map[string]any, model, provider, deviceMid, sessionID string, placeDir, placeGit string) bool {
+	if len(zcodePrompt3172.CliPrefix) == 0 {
 		return false
 	}
 	existing := body["system"]
-	// 幂等：首块已是官方标识则视为已注入
+	// 幂等:首块已是 3.17.2 官方标识则视为已注入
 	if list, ok := existing.([]any); ok && len(list) > 0 {
 		if first, ok := list[0].(map[string]any); ok {
-			if t, _ := first["text"].(string); t == StrValue(zcodeSystemBlocks[0]["text"]) {
+			if t, _ := first["text"].(string); t == zcodePrompt3172.CliPrefix {
 				return false
 			}
 		}
 	}
 
-	// 第 1、2 块原样；其余一切文本合并进第 3 块
-	var official []any
-	for i := 0; i < 2 && i < len(zcodeSystemBlocks); i++ {
-		official = append(official, deepCopyDict(zcodeSystemBlocks[i]))
-	}
-	var tail []string
-	for i := 2; i < len(zcodeSystemBlocks); i++ {
-		text, _ := zcodeSystemBlocks[i]["text"].(string)
-		if strings.TrimSpace(text) != "" {
-			tail = append(tail, text)
-		}
-	}
-	if strings.TrimSpace(model) != "" {
-		tail = append(tail, fmt.Sprintf("- You are powered by the model named %s.", model))
-	}
-	var userParts []string
-	for _, b := range normalizeUserSystem(existing) {
-		if t, ok := b["text"].(string); ok && strings.TrimSpace(t) != "" {
-			userParts = append(userParts, t)
-		}
-	}
-	if len(userParts) > 0 {
-		tail = append(tail, strings.Join(userParts, "\n\n"))
+	cached := func(text string) map[string]any {
+		return map[string]any{"type": "text", "text": text, "cache_control": map[string]any{"type": "ephemeral"}}
 	}
 
-	official = append(official, map[string]any{
-		"type":          "text",
-		"text":          strings.Join(tail, "\n\n"),
-		"cache_control": map[string]any{"type": "ephemeral"},
-	})
-	body["system"] = official
+	// 客户端自有 system 文本(原样并入末块)
+	var own []string
+	for _, b := range normalizeUserSystem(existing) {
+		if t, ok := b["text"].(string); ok && strings.TrimSpace(t) != "" {
+			own = append(own, t)
+		}
+	}
+
+	// 动态段
+	p := zcodePrompt3172
+	env := p.Environment.Heading + "\n" + p.Environment.InvokedLine
+	if placeDir != "" {
+		env += "\n - " + p.Environment.CwdLabel + ": " + placeDir
+		if placeGit == "yes" || placeGit == "no" {
+			git := p.Environment.GitNo
+			if placeGit == "yes" {
+				git = p.Environment.GitYes
+			}
+			env += "\n - " + p.Environment.GitLabel + ": " + git
+		}
+	}
+	env += "\n - " + p.Environment.PlatformLabel + ": " + HostPlatform()
+	env += "\n - " + p.Environment.OsVersionLabel + ": " + HostOSVersion()
+	env += "\n - " + p.Environment.UntrustedNote
+	dynamic := []string{p.DynamicBehavior}
+	if hasSkillTool(body) {
+		dynamic = append(dynamic, p.SessionGuidance)
+	}
+	dynamic = append(dynamic, env)
+	if strings.TrimSpace(model) != "" {
+		prov := p.Environment.PoweredByProvider
+		if provider != "" {
+			prov = provider
+		}
+		dynamic = append(dynamic, strings.ReplaceAll(strings.ReplaceAll(p.PoweredBy, "{provider}", prov), "{model}", model))
+	}
+	dynamic = append(dynamic, p.ContextManagement)
+	dynamic = append(dynamic, own...)
+
+	body["system"] = []any{
+		cached(p.CliPrefix),
+		cached(strings.Join(p.StableSections, "\n\n")),
+		cached("\n\n" + strings.Join(dynamic, "\n\n")),
+	}
 	return true
+}
+
+// hasSkillTool 请求是否声明了 Skill 工具(决定 sessionGuidance 段去留)。
+func hasSkillTool(body map[string]any) bool {
+	tools, ok := body["tools"].([]any)
+	if !ok {
+		return false
+	}
+	for _, t := range tools {
+		if m, ok := t.(map[string]any); ok {
+			if name, _ := m["name"].(string); name == "Skill" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // deepCopyDict 对齐 copy.deepcopy（JSON 值域内递归）。
@@ -185,16 +279,17 @@ func ApplyCurrentDateTurn(body map[string]any) bool {
 	if !ok || len(messages) == 0 {
 		return false
 	}
+	dateText := fmt.Sprintf("<system-reminder>Today's date is %s.</system-reminder>", time.Now().Format("2006-01-02"))
 	if first, ok := messages[0].(map[string]any); ok && first["role"] == "user" {
 		if content, ok := first["content"].([]any); ok && len(content) > 0 {
 			if block, ok := content[0].(map[string]any); ok {
-				if isDateTurnText(block["text"]) {
+				if t, _ := block["text"].(string); t == dateText {
 					return false
 				}
 			}
 		}
 	}
-	dateText := fmt.Sprintf("<system-reminder>\nToday's date is %s.\n</system-reminder>", time.Now().Format("2006-01-02"))
+	// 3.17.2 形态:单行、无换行包裹(旧多行形态同属过时指纹,一并替换)
 	dateTurn := map[string]any{
 		"role": "user",
 		"content": []any{
@@ -207,8 +302,31 @@ func ApplyCurrentDateTurn(body map[string]any) bool {
 	return true
 }
 
-// ApplyCacheControl 最后一条非 system 消息的最后一个 block 加 ephemeral 缓存标记。幂等。
+// ApplyCacheControl 对齐 3.17.2 dress 的缓存语义:轮次里所有 cache_control
+// 先剥净(tools 同),仅最后一条非 system 消息的最后一个 block 重新标记。幂等。
 func ApplyCacheControl(body map[string]any) bool {
+	if tools, ok := body["tools"].([]any); ok {
+		for _, t := range tools {
+			if m, ok := t.(map[string]any); ok {
+				delete(m, "cache_control")
+			}
+		}
+	}
+	if messages, ok := body["messages"].([]any); ok {
+		for _, msg := range messages {
+			m, ok := msg.(map[string]any)
+			if !ok {
+				continue
+			}
+			if content, ok := m["content"].([]any); ok {
+				for _, blk := range content {
+					if bm, ok := blk.(map[string]any); ok {
+						delete(bm, "cache_control")
+					}
+				}
+			}
+		}
+	}
 	messages, ok := body["messages"].([]any)
 	if !ok || len(messages) == 0 {
 		return false
@@ -375,13 +493,13 @@ func BodyTransformJWTUserID(jwtToken string) string {
 // TransformBody 按 anthropic 通道变换 body（原地修改并返回）。变换失败静默保持原样。
 //
 // user_id 为 JWT sub（仅用于兜底）；attribution 优先用 device_mid/session_id 组 blob。
-func TransformBody(body map[string]any, userID, model string, deviceMid, sessionID string) map[string]any {
+func TransformBody(body map[string]any, userID, model string, deviceMid, sessionID, provider, placeDir, placeGit string) map[string]any {
 	func() {
 		defer func() {
 			// 对齐 except Exception: pass —— 变换永不放大请求失败
 			_ = recover()
 		}()
-		ApplyStartPlanSystem(body, model)
+		ApplyStartPlanSystem(body, model, provider, deviceMid, sessionID, placeDir, placeGit)
 		ApplyCacheControl(body)
 		ApplyCurrentDateTurn(body)
 		if deviceMid != "" || sessionID != "" {

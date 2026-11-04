@@ -126,6 +126,6 @@ func EstimateInputTokens(body map[string]any) int {
 // Key 回退通道不做 transform，此估算对其略偏高——预算场景偏高是安全方向。
 func EstimateInputTokensAfterTransform(body map[string]any, model string) int {
 	transformed := deepCopyDict(body).(map[string]any)
-	TransformBody(transformed, "", model, strings_repeat0_32, strings_repeat0_36)
+	TransformBody(transformed, "", model, strings_repeat0_32, strings_repeat0_36, "", "", "")
 	return EstimateInputTokens(transformed)
 }

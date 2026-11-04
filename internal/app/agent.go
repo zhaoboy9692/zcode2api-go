@@ -112,7 +112,7 @@ func BuildRequest(account *Account, body map[string]any, verifyParam string,
 		if m, ok := body["model"].(string); ok {
 			model = m
 		}
-		body = TransformBody(body, userID, model, profile.DeviceMid, sessionID)
+		body = TransformBody(body, userID, model, profile.DeviceMid, sessionID, "zai-api", "", "")
 		headers["content-type"] = "application/json"
 		for k, v := range auth {
 			headers[k] = v
@@ -120,13 +120,19 @@ func BuildRequest(account *Account, body map[string]any, verifyParam string,
 		headers["anthropic-version"] = ANTHROPIC_VERSION
 		// start-plan 网关的 harness 要求：mid-conversation system 能力位，
 		// 官方客户端 LLM 调用恒带（vlelyanin / TriDefender 双源一致）。
-		headers["anthropic-beta"] = "mid-conversation-system-2026-04-07"
+		// startHeaders 对齐(喜鹊运行时插件同款;2026-11-03 风控按提示词+头指纹判 3012):
+		// 无 anthropic-beta、无 X-Device-Mid;追踪头是 uuid4 直发。
 		for k, v := range BuildIdentityHeaders(account) {
 			headers[k] = v
 		}
-		for k, v := range BuildTraceHeaders(sessionID) {
-			headers[k] = v
-		}
+		// magpie plan 形态:UA 带 ai-sdk 后缀;X-Device-Mid 不上 plan 通道
+		headers["User-Agent"] = UserAgent() + " ai-sdk/anthropic/3.0.81"
+		delete(headers, "X-Device-Mid")
+		headers["x-request-id"] = uuidx.New4()
+		headers["x-zcode-trace-id"] = uuidx.New4()
+		headers["x-zcode-session-type"] = "main"
+		headers["x-zcode-query-source"] = "main_turn"
+		headers["x-session-id"] = sessionID
 		// 官方 anthropic SDK 同时下发 x-api-key（与 Bearer 同值）；
 		// 缺失会被 start-plan 网关视为非客户端流量（vlelyanin 实证）。
 		if account.JWTToken != "" {

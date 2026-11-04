@@ -270,7 +270,7 @@ func TestAccountPlanKind(t *testing.T) {
 
 func TestApplyStartPlanSystemStrict(t *testing.T) {
 	body := map[string]any{"messages": []any{}, "system": "You are helpful."}
-	changed := ApplyStartPlanSystem(body, "GLM-5.3")
+	changed := ApplyStartPlanSystem(body, "GLM-5.3", "zai-api", "", "", "", "")
 	if !changed {
 		t.Fatal("首次注入应生效")
 	}
@@ -279,7 +279,7 @@ func TestApplyStartPlanSystemStrict(t *testing.T) {
 		t.Fatalf("必须严格三块: %d", len(sys))
 	}
 	// 幂等：首块已是官方标识
-	if ApplyStartPlanSystem(body, "GLM-5.3") {
+	if ApplyStartPlanSystem(body, "GLM-5.3", "zai-api", "", "", "", "") {
 		t.Fatal("重复注入应 no-op")
 	}
 }
@@ -291,7 +291,7 @@ func TestTransformBodyFull(t *testing.T) {
 			map[string]any{"role": "user", "content": "hello"},
 		},
 	}
-	TransformBody(body, "sub-user", "GLM-5.3", "mid-32-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "sess-uuid")
+	TransformBody(body, "sub-user", "GLM-5.3", "mid-32-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "sess-uuid", "zai-api", "", "")
 	// system 三块
 	if sys, ok := body["system"].([]any); !ok || len(sys) != 3 {
 		t.Fatal("system 三块缺失")
