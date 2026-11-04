@@ -88,7 +88,7 @@ zcode-hub/
 client → 鉴权 → [循环: attempt ≤ MAX_ACCOUNT_ATTEMPTS=5]
    1. store.select 取号（round-robin；跳过 exhausted / 冷却中 / 手动停用；
       JWT invalid/风控 disabled 仅当同账号有 API Key 回退时可选）
-   2. 并发槽：该号在飞 ≥ account_concurrency 则跳号（不排队；跳过不计 attempt）
+   2. 并发槽：该号在飞 ≥ 账号自身 concurrency（默认 1，0 = 不限）则跳号（不排队；跳过不计 attempt）
    3. 构建上游请求（每账号指纹 + 透传头过滤 + Plan/Key 通道）
    4. 响应分类：
       ok                 → 透传/翻译返回；释放槽在流关闭时
@@ -121,7 +121,7 @@ client → 鉴权 → [循环: attempt ≤ MAX_ACCOUNT_ATTEMPTS=5]
    JWT+Key：INVALID/DISABLED 仍可选，对话走 api.z.ai 回退；纯 apiKey 不可再选。
 ```
 
-参数：`MAX_ACCOUNT_ATTEMPTS=5`、`COOLING_SECONDS=300`（仅 5xx/连接失败）、`RETRY_429_TIMES=5`、`ACCOUNT_CONCURRENCY=2`（0 = 不限）。额度耗尽由后台 `quota` 刷新探测恢复，没有独立 `exhausted_retry_seconds`。
+参数：`MAX_ACCOUNT_ATTEMPTS=5`、`COOLING_SECONDS=300`（仅 5xx/连接失败）、`RETRY_429_TIMES=5`、额度耗尽由后台 `quota` 刷新探测恢复，没有独立 `exhausted_retry_seconds`。
 
 ### 4.3 额度监控
 

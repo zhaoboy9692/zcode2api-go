@@ -25,8 +25,8 @@ import (
 )
 
 const (
-	maxCaptchaRetries   = 3
-	maxAccountAttempts  = 5
+	maxCaptchaRetries  = 3
+	maxAccountAttempts = 5
 )
 
 // jsonOut 把响应写成 FastAPI JSONResponse 等价形态（紧凑、无 HTML 转义）。
@@ -239,7 +239,7 @@ func isRiskControl(statusCode int, text string) bool {
 // isConcurrencyHit 429 body 是否为 3009「模型并发已满」（区别于真频控，等待策略不同）。
 //
 // 业务码必须解析后精确比较：logid 是 20 位随机数字，裸子串 "3009" 会撞车
-//（constants.CONCURRENCY_BUSINESS_CODE 注记的同款教训）；非 JSON 形态退回
+// （constants.CONCURRENCY_BUSINESS_CODE 注记的同款教训）；非 JSON 形态退回
 // 文案匹配兜底。
 func isConcurrencyHit(text string) bool {
 	code, ok := app.BusinessCode(app.SafeJSON(text))
@@ -440,11 +440,12 @@ func parkSlot(slotBox *string) {
 }
 
 // reacquireSlot 等待结束后重新占槽；占不到则让调用方换号。
+// 上限取账号自己的 concurrency（≥1 上限 / 0 不限，见 Account 字段注释）。
 func reacquireSlot(account *app.Account, slotBox *string) bool {
 	if slotBox == nil {
 		return true
 	}
-	limit := app.DefaultStore.AccountConcurrency()
+	limit := account.Concurrency
 	if limit <= 0 {
 		return true
 	}
@@ -455,9 +456,6 @@ func reacquireSlot(account *app.Account, slotBox *string) bool {
 	*slotBox = account.ID
 	return true
 }
-
-// limit 当前并发上限（0 = 不限），实时读取设置（后台改后即生效）。
-func limit() int { return app.DefaultStore.AccountConcurrency() }
 
 // ── 后台任务（对齐 _spawn_bg / _safe_refresh）───────────────────────────────
 
@@ -587,7 +585,7 @@ func randHex(n int) string {
 // ── OpenAI 风格端点公共骨架（/v1/chat/completions 与 /v1/responses 共用）─────
 //
 // 流程：解析 JSON → translate(payload) 得 anthropic body → 归一 → 调度
-//（多账号/重试/验证码与 /v1/messages 同一条路径）→ 按客户端要求走流式或
+// （多账号/重试/验证码与 /v1/messages 同一条路径）→ 按客户端要求走流式或
 // 非流式消费。三方差异全部参数化：
 //
 //	translate(payload) -> (anthropic_body, err)
@@ -898,13 +896,39 @@ func scanSSE(body ioReadCloser, r *http.Request, onEvent func(map[string]any) bo
 
 // ── 多账号轮询调度（对齐 _dispatch）─────────────────────────────────────────
 //
-// 单账号并发限制：选号后若该账号在飞请求已达上限（store.account_concurrency，
-// 0 = 不限），跳过换下一个账号——不排队（流式请求可占槽位数分钟，排队会
-// 放大延迟甚至吊死客户端）。满号跳过不计入 MAX_ACCOUNT_ATTEMPTS（只计真正
-// 进入 _try_account 的次数）。全满/无号 → 503。
+// 单账号并发限制：选号后若该账号在飞请求已达自己的 concurrency（账号级可单独
+// 设置，≥1 上限 / 0 不限，缺省 1），跳过换下一个账号——不排队（流式请求可占
+// 槽位数分钟，排队会放大延迟甚至吊死客户端）。满号跳过不计入
+// MAX_ACCOUNT_ATTEMPTS（只计真正进入 _try_account 的次数）。全满/无号 → 503。
+// dispatch 多 provider 自动路由：目标 provider 无可用账号（额度/冷却/并发全灭）时，
+// 若另一家有可选账号则自动换家重试——裸模型名（无 bigmodel/ 前缀、无 x-provider 头）
+// 在两家同名，按池子可用性降级；显式标记仍严格尊重（换家只发生在"打不了"时）。
 func (s *Server) dispatch(reqID string, body map[string]any, incomingHeaders map[string]string, provider string, r *http.Request) *dispatchResult {
+	res := s.dispatchProvider(reqID, body, incomingHeaders, provider, r)
+	if res.kind != kindJSON || res.json == nil || res.json.status != 503 {
+		return res
+	}
+	eb, _ := res.json.body.(map[string]any)
+	errDict, _ := eb["error"].(map[string]any)
+	if et, _ := errDict["type"].(string); et != "no_available_account" {
+		return res
+	}
+	if !app.DefaultStore.AutoRouteEnabled() {
+		return res // 开关关闭：只按显式前缀/请求头路由，不跨家降级
+	}
+	other := "bigmodel"
+	if provider == "bigmodel" {
+		other = "zai"
+	}
+	if other != provider && app.DefaultStore.HasSelectable(other) {
+		app.LogInfo("gateway", fmt.Sprintf("自动路由：%s 无可用账号，切到 %s 重试", provider, other))
+		return s.dispatchProvider(reqID, body, incomingHeaders, other, r)
+	}
+	return res
+}
+
+func (s *Server) dispatchProvider(reqID string, body map[string]any, incomingHeaders map[string]string, provider string, r *http.Request) *dispatchResult {
 	tried := map[string]bool{}
-	limitVal := limit()
 	attempts := 0
 
 	for attempts < maxAccountAttempts {
@@ -913,6 +937,7 @@ func (s *Server) dispatch(reqID string, body map[string]any, incomingHeaders map
 			break
 		}
 		tried[account.ID] = true
+		limitVal := account.Concurrency
 		if limitVal > 0 && inflightGet(account.ID) >= limitVal {
 			app.LogWarn(reqID, fmt.Sprintf("账号 %s 并发已满（%d/%d），切换下一个", account.Name, inflightGet(account.ID), limitVal))
 			continue
@@ -925,7 +950,7 @@ func (s *Server) dispatch(reqID string, body map[string]any, incomingHeaders map
 		planChannel := provider == "zai" && account.UsesPlanChannel()
 		needsCaptcha := false
 		if planChannel {
-			needsCaptcha = app.DefaultCaptchaManager.ModelRequestsNeedCaptcha(app.EgressFor(app.UPSTREAM["zai"]))
+			needsCaptcha = app.DefaultCaptchaManager.ModelRequestsNeedCaptcha(app.EgressTagForAccount(account))
 		}
 
 		slotBox := ""
@@ -1041,7 +1066,7 @@ func (s *Server) tryAccount(reqID string, account *app.Account, body map[string]
 	// 验证码必须与本次 Plan 请求同出口（见 app/egress.go）；记下来供失败日志佐证
 	captchaEgress := ""
 	if planChannel {
-		captchaEgress = app.EgressFor(app.UPSTREAM["zai"])
+		captchaEgress = app.EgressTagForAccount(account)
 	}
 	for {
 		attemptT0 := app.NowFloat()
@@ -1052,7 +1077,7 @@ func (s *Server) tryAccount(reqID string, account *app.Account, body map[string]
 			parkSlot(slotBox)
 			// 验证码必须与本次 Plan 请求同出口：token 由某出口签发后，
 			// 换出口使用会被上游判 unusual activity（3012）。
-			vp, vr, err := app.DefaultCaptchaManager.GetVerifyParam(app.EgressFor(app.UPSTREAM["zai"]))
+			vp, vr, err := app.DefaultCaptchaManager.GetVerifyParam(app.EgressTagForAccount(account))
 			if err != nil {
 				app.LogReqErr(reqID, fmt.Sprintf("人机校验失败: %v", err))
 				app.ReqLogFinishError(reqID, fmt.Sprintf("人机校验失败: %v", err), app.IntPtr(500), nil)
@@ -1077,7 +1102,7 @@ func (s *Server) tryAccount(reqID string, account *app.Account, body map[string]
 			return &dispatchResult{kind: kindNextAccount}
 		}
 
-		client := &http.Client{Transport: gatewayTransport()}
+		client := &http.Client{Transport: gatewayTransportFor(account)}
 		req, err := http.NewRequest(http.MethodPost, build.URL, newByteBody(build.Body))
 		if err != nil {
 			client.CloseIdleConnections()
@@ -1151,7 +1176,7 @@ func (s *Server) tryAccount(reqID string, account *app.Account, body map[string]
 				challenge = detectCaptchaChallenge(func(k string) string { return resp.Header.Get(k) }, statusCode, text)
 			}
 			if challenge != "" {
-				app.DefaultCaptchaManager.Invalidate(app.EgressFor(app.UPSTREAM["zai"]))
+				app.DefaultCaptchaManager.Invalidate(app.EgressTagForAccount(account))
 				captchaRetries++
 				if captchaRetries >= maxCaptchaRetries {
 					account.RecordResult(false, "验证码挑战连续失败", 20)
@@ -1419,17 +1444,25 @@ func (s *Server) tryAccount(reqID string, account *app.Account, body map[string]
 	}
 }
 
-// gatewayTransport 对齐 httpx.Timeout(connect=30, read=None, write=120, pool=30)：
+// gatewayTransportFor 对齐 httpx.Timeout(connect=30, read=None, write=120, pool=30)：
 // 拨号/握手 30s，读不设超时（流式长连接），连接池空闲回收。
-func gatewayTransport() *http.Transport {
-	return &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment, // httpx trust_env=True
+// 代理优先级：账号级 > 全局 ZCODE_UPSTREAM_PROXY（NO_PROXY 仍生效）> env trust_env=True。
+func gatewayTransportFor(account *app.Account) *http.Transport {
+	t := &http.Transport{
 		DialContext:           dialerWithTimeout(30 * time.Second),
 		TLSHandshakeTimeout:   30 * time.Second,
 		ResponseHeaderTimeout: 0, // read=None
 		IdleConnTimeout:       90 * time.Second,
 		MaxIdleConnsPerHost:   8,
 	}
+	if raw := app.ProxyRawForAccount(account); raw != "" {
+		t.Proxy = app.ProxyFuncForRaw(raw)
+	} else if app.UpstreamProxy() != nil {
+		t.Proxy = app.ProxyFuncFor()
+	} else {
+		t.Proxy = http.ProxyFromEnvironment // httpx trust_env=True
+	}
+	return t
 }
 
 func collapseSpace(s string) string { return strings.Join(strings.Fields(s), " ") }

@@ -220,6 +220,30 @@ func (s *Server) handleEditAccount(w http.ResponseWriter, r *http.Request) {
 		acc.Status = app.StatusActive
 		acc.LastError = ""
 	}
+	// 网关并发上限（账号级）：显式给出 concurrency 键才改；≥1 上限，0 = 不限
+	if raw, has := payload["concurrency"]; has {
+		if n, ok := app.AsInt(raw); ok && n >= 0 {
+			acc.Concurrency = n
+		}
+	}
+	// 出站代理：显式给出 proxy 键才改（空串 = 清除，跟随全局/直连）
+	if raw, has := payload["proxy"]; has {
+		proxy, _ := raw.(string)
+		proxy = strings.TrimSpace(proxy)
+		if proxy != "" {
+			normalized, perr := app.NormalizeProxyRaw(proxy)
+			if perr != nil {
+				jsonOut(w, 400, map[string]any{"detail": perr.Error()})
+				return
+			}
+			proxy = normalized
+		}
+		if proxy != acc.Proxy {
+			acc.Proxy = proxy
+			// 出口变更：旧出口的验证码 token 作废（新出口签发的才与请求同源）
+			app.DefaultCaptchaManager.Invalidate(app.EgressTagForAccount(acc))
+		}
+	}
 	app.DefaultStore.UpdateAccount(acc)
 	jsonOut(w, 200, map[string]any{"ok": true})
 }
@@ -336,8 +360,15 @@ func (s *Server) handleRefreshOne(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 404, map[string]any{"detail": "账号不存在"})
 		return
 	}
+	// 额度源按形态分流：JWT → billing 族（顺带刷 Coding 快照）；
+	// 纯 API Key 账号（bigmodel 等）→ monitor 快照就是主账本（不走 billing 拦截门）
 	if acc.Mode != "jwt" {
-		jsonOut(w, 200, map[string]any{"ok": false, "message": "仅 Coding Plan (JWT) 账号支持额度查询"})
+		res := app.FetchCodingLimits(acc)
+		if res["error"] == nil {
+			app.DefaultStore.UpdateAccount(acc)
+		}
+		_, hasErr := res["error"]
+		jsonOut(w, 200, map[string]any{"ok": !hasErr, "result": res, "account": acc.PublicView()})
 		return
 	}
 	if blocked := app.BillingBlockReason(acc, "上游刷新"); blocked != "" {
@@ -375,8 +406,8 @@ func (s *Server) handleCodingLimits(w http.ResponseWriter, r *http.Request) {
 // 授权链接有效期：上游 cli/init 发起的流程约 5 分钟过期（zcode.z.ai 行为）。
 // 会话过期后 poll 返回 {"status": "expired"}（幂等，可安全重试）。
 const (
-	loginFlowTTL        = 300.0 // 秒
-	loginExchangeTimeout = 60.0 // 兑换 API Key 总时长上限（秒）
+	loginFlowTTL         = 300.0 // 秒
+	loginExchangeTimeout = 60.0  // 兑换 API Key 总时长上限（秒）
 )
 
 // loginFlowEntry 单进程内存态即可：登录会话不该跨进程存活，重启后用户重新生成链接。
@@ -922,15 +953,15 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		checkedAt = latest.CheckedAt
 	}
 	jsonOut(w, 200, map[string]any{
-		"admin_key_set":         adminKey != "",
-		"admin_key_masked":      maskSecret(adminKey),
-		"admin_key_is_default":  adminKey != "" && adminKey == app.DEFAULT_ADMIN_KEY,
-		"gateway_key_set":       gatewayKey != "",
-		"gateway_key_masked":    maskSecret(gatewayKey),
-		"quota_refresh_interval": app.DefaultStore.QuotaRefreshInterval(),
-		"account_concurrency":   app.DefaultStore.AccountConcurrency(),
-		"claim_round_interval":  app.DefaultStore.ClaimRoundInterval(),
-		"claim_round_hours":     joinInts(app.DefaultStore.ClaimRoundHours()),
+		"admin_key_set":            adminKey != "",
+		"admin_key_masked":         maskSecret(adminKey),
+		"admin_key_is_default":     adminKey != "" && adminKey == app.DEFAULT_ADMIN_KEY,
+		"gateway_key_set":          gatewayKey != "",
+		"gateway_key_masked":       maskSecret(gatewayKey),
+		"quota_refresh_interval":   app.DefaultStore.QuotaRefreshInterval(),
+		"claim_round_interval":     app.DefaultStore.ClaimRoundInterval(),
+		"claim_round_hours":        joinInts(app.DefaultStore.ClaimRoundHours()),
+		"auto_route":               app.DefaultStore.AutoRouteEnabled(),
 		"auto_sync_client_version": autoSync,
 		"zcode_client_version":     app.ClientAppVersion(),
 		"zcode_latest_version":     latestVer,
@@ -989,14 +1020,6 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		app.DefaultStore.SetSetting("quota_refresh_interval", fmt.Sprintf("%d", n))
 	}
-	if v, has := payload["account_concurrency"]; has {
-		n, ok := app.AsInt(v)
-		if !ok || n < 0 {
-			bad("账号并发必须是非负整数（0 = 不限）")
-			return
-		}
-		app.DefaultStore.SetSetting("account_concurrency", fmt.Sprintf("%d", n))
-	}
 	if v, has := payload["claim_round_interval"]; has {
 		n, ok := app.AsInt(v)
 		if !ok || n < 0 {
@@ -1034,6 +1057,11 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		sortIntsAsc(hours)
 		app.DefaultStore.SetSetting("claim_round_hours", joinInts(hours))
+	}
+	if v, has := payload["auto_route"]; has {
+		if b, ok := v.(bool); ok {
+			app.DefaultStore.SetSetting("auto_route", fmt.Sprintf("%v", b))
+		}
 	}
 	if v, has := payload["auto_sync_client_version"]; has {
 		enabled := false
@@ -1102,10 +1130,44 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleImport POST /admin/api/import
+//
+// 三种形态兼容：
+//  1. {"providers": ...} —— 明文 providers JSON（旧前端行为）
+//  2. {"content": "<文件原文>", "password": "..."} —— 文件原文文本（providers JSON 或 .zsb）
+//  3. 直接把 .zsb envelope 当 body（kdf+cipher 字段）+ password
 func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	payload, jresp := decodeJSONBody(r)
 	if jresp != nil {
 		jsonOut(w, 400, map[string]any{"detail": jresp.body})
+		return
+	}
+	// content 形态：文件原文（前端导入按钮走这里，支持 .json / .zsb）
+	if content := DictGetStrM(payload, "content", ""); content != "" {
+		var doc map[string]any
+		if err := json.Unmarshal([]byte(content), &doc); err != nil {
+			jsonOut(w, 400, map[string]any{"detail": fmt.Sprintf("文件内容不是有效 JSON: %v", err)})
+			return
+		}
+		if app.IsSealedBundle(doc) {
+			inner, err := app.OpenZsbBundle(doc, DictGetStrM(payload, "password", ""))
+			if err != nil {
+				jsonOut(w, 400, map[string]any{"detail": err.Error()})
+				return
+			}
+			doc = app.ZsbToProviders(inner)
+		}
+		payload = doc
+	} else if app.IsSealedBundle(payload) {
+		// envelope 直投形态
+		inner, err := app.OpenZsbBundle(payload, DictGetStrM(payload, "password", ""))
+		if err != nil {
+			jsonOut(w, 400, map[string]any{"detail": err.Error()})
+			return
+		}
+		payload = app.ZsbToProviders(inner)
+	}
+	if _, ok := payload["providers"]; !ok {
+		jsonOut(w, 400, map[string]any{"detail": "无法识别的导入内容：需要 providers JSON 或 .zsb 加密封包"})
 		return
 	}
 	existing := map[string]bool{}
@@ -1113,16 +1175,22 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		existing[a.ID] = true
 	}
 	count := app.DefaultStore.ImportAccounts(payload)
-	// 导入的新账号：安装序（幂等）+ JWT 账号激活+自动领取（幂等：重复 token 不新增）
-	for _, a := range app.DefaultStore.ListAccounts("zai") {
+	// 导入的新账号：zai 走安装序 + JWT 激活+自动领取（幂等：重复 token 不新增）；
+	// bigmodel 账号无 zai 安装序，只计数
+	added := 0
+	for _, a := range app.DefaultStore.ListAccounts("") {
 		if !existing[a.ID] {
-			app.ScheduleInstall(a)
-			if a.Mode == "jwt" {
-				s.scheduleAutoClaim(a)
+			added++
+			if a.Provider == "zai" {
+				app.ScheduleInstall(a)
+				if a.Mode == "jwt" {
+					s.scheduleAutoClaim(a)
+				}
 			}
 		}
 	}
-	jsonOut(w, 200, map[string]any{"count": count})
+	// 口径：count = 处理数（含重复 token 去重命中）；added = 真正新增；skipped = 已存在
+	jsonOut(w, 200, map[string]any{"count": count, "added": added, "skipped": count - added})
 }
 
 // ── 请求监控 ─────────────────────────────────────────────────────────────────

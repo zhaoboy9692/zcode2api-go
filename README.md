@@ -166,7 +166,6 @@ JWT 账号调用上游时需携带阿里云无痕验证参数（请求头 `X-Ali
 | `ZCODE_QUOTA_REFRESH_INTERVAL` | 1800 | 后台刷新额度间隔（秒），0 关闭 |
 | `ZCODE_BILLING_REFRESH_MIN_INTERVAL` | 60 | 成功对话后计费刷新最小间隔（秒）|
 | `ZCODE_COOLING_SECONDS` | 300 | 限流冷却时长（秒）|
-| `ZCODE_ACCOUNT_CONCURRENCY` | 2 | 单账号并发上限，0 不限（运行时可在后台设置改，以库为准）|
 | `ZCODE_CLAIM_ROUND_INTERVAL` | 3600 | 套餐自动领取轮间隔（秒），0 关闭（运行时可在后台设置改，以库为准）|
 | `ZCODE_CLAIM_ROUND_HOURS` | 19 | 领取窗口（北京时间小时，逗号分隔；空/* = 全天）|
 | `ZCODE_RISK_COOLDOWN_BASE` / `_MAX` | 900 / 86400 | 风控指数退避首冷 / 上限（秒）|

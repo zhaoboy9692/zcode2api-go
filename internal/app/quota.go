@@ -20,8 +20,8 @@ import (
 )
 
 var (
-	deviceMidMu   sync.Mutex
-	deviceMidVal  string
+	deviceMidMu  sync.Mutex
+	deviceMidVal string
 )
 
 // DeviceMid 本机设备 ID（ZCode 客户端 telemetry 同款语义）。
@@ -64,19 +64,19 @@ func DeviceMid() string {
 func authHeaders(account *Account) map[string]string {
 	profile := ProfileFor(account)
 	headers := map[string]string{
-		"Content-Type":         "application/json",
-		"User-Agent":           "ZCode/" + BillingAppVersion(),
-		"HTTP-Referer":         ZCODE_ORIGIN,
-		"X-Title":              BILLING_TITLE,
-		"X-ZCode-App-Version":  BillingAppVersion(),
-		"X-Platform":           profile.PlatformFull(),
-		"X-Release-Channel":    BILLING_RELEASE_CHANNEL,
-		"X-Client-Language":    profile.Language,
-		"X-Client-Timezone":    profile.Timezone,
-		"X-Os-Category":        profile.OsCategory(),
-		"X-Os-Version":         profile.OSVersion,
-		"X-Device-Mid":         profile.DeviceMid,
-		"x-request-id":         uuidx.New4(),
+		"Content-Type":        "application/json",
+		"User-Agent":          "ZCode/" + BillingAppVersion(),
+		"HTTP-Referer":        ZCODE_ORIGIN,
+		"X-Title":             BILLING_TITLE,
+		"X-ZCode-App-Version": BillingAppVersion(),
+		"X-Platform":          profile.PlatformFull(),
+		"X-Release-Channel":   BILLING_RELEASE_CHANNEL,
+		"X-Client-Language":   profile.Language,
+		"X-Client-Timezone":   profile.Timezone,
+		"X-Os-Category":       profile.OsCategory(),
+		"X-Os-Version":        profile.OSVersion,
+		"X-Device-Mid":        profile.DeviceMid,
+		"x-request-id":        uuidx.New4(),
 	}
 	if account.Mode == "jwt" && account.JWTToken != "" {
 		headers["Authorization"] = "Bearer " + account.JWTToken
@@ -152,7 +152,7 @@ func FetchQuota(account *Account) map[string]any {
 		err  error
 	}
 	getPath := func(path string, ch chan respErr) {
-		client := &http.Client{Timeout: 20 * time.Second, Transport: directTransport()}
+		client := &http.Client{Timeout: 20 * time.Second, Transport: upstreamTransportFor(account)}
 		req, err := http.NewRequest(http.MethodGet, base+path, nil)
 		if err != nil {
 			ch <- respErr{err: err}
@@ -207,6 +207,13 @@ func FetchQuota(account *Account) map[string]any {
 		if !strings.Contains(body, "captcha") && !strings.Contains(body, "verify") {
 			account.Status = StatusInvalid
 			account.LastError = AuthExpiredMessage
+			// Coding 平面快照：有 API Key 的账号顺带拉一次 monitor（bigmodel 账号的主账本）
+			if account.APIKey != "" {
+				if res := FetchCodingLimits(account); res["error"] == nil {
+					// snapshot 已写入 account.CodingLimits
+				}
+			}
+
 			DefaultStore.UpdateAccount(account)
 			return map[string]any{"error": account.LastError}
 		}
@@ -412,7 +419,7 @@ func FetchQuota(account *Account) map[string]any {
 			detail += fmt.Sprintf("%s=code%d", k, v)
 		}
 		LogWarn("quota", fmt.Sprintf("账号 %s billing 业务错误但保留可选（%s）", account.Name, detail))
-	} else if len(quotaMap) == 0 && billingPlans == nil && result["usage"] == nil {
+	} else if len(quotaMap) == 0 && len(billingPlans) == 0 && result["usage"] == nil {
 		// 新号体验额度：上游对新注册账号可能 **billing 全空/全拒**，但 messages 仍能
 		// 正常服务（2026-09-06 实测：空 billing 的 oauth-login 100% 成功服务请求；
 		// 2026-11-01 复核：billing/preview、balance 均空/1005，新号照样有体验套餐）。
@@ -481,57 +488,317 @@ func normalizeLimits(data map[string]any) []any {
 // 额度源补盲，只读、不写账号状态（避免与 billing 判定打架）。
 //
 // 返回 {"limits": [...], "raw": {...}} 或 {"error": ...}
+// FetchCodingLimits 拉取 Coding 平面额度（monitor 端点，API Key 鉴权）。
+//
+// 与 `FetchQuota` 是**两套独立账本**：Plan 通道额度来自 zcode.z.ai 的 billing 族；
+// Coding 平面的额度完全不在那套账里。端点按 provider 分流（对齐 zcode-switch 的
+// Monitor 通道）：bigmodel 账号走 open.bigmodel.cn（并带 subscription/list 取
+// 套餐档位与有效期），zai 账号走 api.z.ai。
+//
+// 成功时把快照写入 account.CodingLimits（调用方负责持久化）。
+//
+// 返回 {"limits": [...], "tier": "...", "expire": "..."} 或 {"error": ...}
 func FetchCodingLimits(account *Account) map[string]any {
 	apiKey := strings.TrimSpace(account.APIKey)
 	if apiKey == "" {
 		return map[string]any{"error": "该账号没有 API Key，无法查询 Coding 平面额度"}
 	}
-	client := &http.Client{Timeout: 20 * time.Second, Transport: directTransport()}
-	req, err := http.NewRequest(http.MethodGet, CODING_LIMIT_URL, nil)
+	origin := ZAI_API_ORIGIN
+	if account.Provider == "bigmodel" {
+		origin = BIGMODEL_ORIGIN
+	}
+	get := func(path string) (map[string]any, int, error) {
+		client := &http.Client{Timeout: 20 * time.Second, Transport: upstreamTransportFor(account)}
+		req, err := http.NewRequest(http.MethodGet, origin+path, nil)
+		if err != nil {
+			return nil, 0, err
+		}
+		req.Header.Set("authorization", apiKey)
+		req.Header.Set("accept", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, 0, err
+		}
+		defer resp.Body.Close()
+		buf := &strings.Builder{}
+		tmp := make([]byte, 32*1024)
+		for {
+			n, readErr := resp.Body.Read(tmp)
+			if n > 0 {
+				buf.Write(tmp[:n])
+			}
+			if readErr != nil {
+				break
+			}
+		}
+		data, err := JSONDecode(buf.String())
+		if err != nil {
+			return nil, resp.StatusCode, fmt.Errorf("上游返回非 JSON（HTTP %d）", resp.StatusCode)
+		}
+		dict, ok := data.(map[string]any)
+		if !ok {
+			return nil, resp.StatusCode, fmt.Errorf("上游返回结构异常")
+		}
+		return dict, resp.StatusCode, nil
+	}
+
+	dict, status, err := get("/api/monitor/usage/quota/limit")
 	if err != nil {
 		return map[string]any{"error": fmt.Sprintf("请求上游失败: %v", err)}
 	}
-	req.Header.Set("authorization", apiKey)
-	req.Header.Set("accept", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return map[string]any{"error": fmt.Sprintf("请求上游失败: %v", err)}
-	}
-	defer resp.Body.Close()
-	buf := &strings.Builder{}
-	tmp := make([]byte, 32*1024)
-	for {
-		n, readErr := resp.Body.Read(tmp)
-		if n > 0 {
-			buf.Write(tmp[:n])
+	if code, isErr := BusinessCode(dict); isErr {
+		msg := DictGetStr(dict, "msg", "")
+		if msg == "" {
+			msg = fmt.Sprintf("业务错误 code=%d", code)
 		}
-		if readErr != nil {
-			break
+		return map[string]any{"error": msg, "code": code}
+	}
+	if status >= 400 {
+		return map[string]any{"error": fmt.Sprintf("HTTP %d", status)}
+	}
+
+	items := normalizeCodingItems(dict)
+	// 套餐档位：monitor data.level；bigmodel 再补 subscription/list（档位名 + 有效期）
+	dataDict := dictDict(dict, "data")
+	tier := codingTier(DictGetStr(dataDict, "level", ""))
+	expire := ""
+	if account.Provider == "bigmodel" {
+		if sub, _, subErr := get("/api/biz/subscription/list"); subErr == nil {
+			if arr, ok := sub["data"].([]any); ok {
+				for _, rawSub := range arr {
+					sm, ok := rawSub.(map[string]any)
+					if !ok {
+						continue
+					}
+					st := strings.ToUpper(DictGetStr(sm, "status", ""))
+					if st != "" && st != "VALID" && st != "ACTIVE" {
+						continue
+					}
+					if pn := DictGetStr(sm, "productName", ""); pn != "" {
+						tier = codingTier(pn)
+					}
+					expire = codingExpire(sm)
+					break
+				}
+			}
 		}
 	}
-	data, err := JSONDecode(buf.String())
+	// 套餐固定规格（GLM Coding Plan 公开售卖页口径）：档位 → 每周重置卡张数 / 并发数。
+	// 上游接口不返回这两个数，按 tier 映射；未知档位不给，前端回落到窗口数计数。
+	weeklyCards, concurrency := 0, 0
+	switch strings.ToLower(tier) {
+	case "max":
+		weeklyCards, concurrency = 3, 4
+	case "pro":
+		weeklyCards, concurrency = 2, 2
+	}
+	snapshot := map[string]any{
+		"items":        items,
+		"tier":         strOrNil(tier),
+		"expire":       strOrNil(expire),
+		"weekly_cards": weeklyCards,
+		"concurrency":  concurrency,
+		"refreshed_at": NowFloat(),
+	}
+	// 真实重置卡计数（官方 /coding-plan/reset/status，双 token 鉴权）：
+	// available_five_hour_resets / available_week_resets，每张卡自带 expire_at（ms）。
+	// 有即覆盖规格映射的 weekly_cards —— 这是「N 张每周重置卡」的权威数据源。
+	if account.JWTToken != "" && account.PlatformToken != "" {
+		if rc := fetchResetCredits(account); rc != nil {
+			snapshot["reset_credits"] = rc
+			if nw, ok := rc["weekly"].(int); ok && nw > 0 {
+				snapshot["weekly_cards"] = nw
+			}
+		}
+	}
+	account.CodingLimits = snapshot
+	return snapshot
+}
+
+// fetchResetCredits 官方重置卡计数：GET /coding-plan/reset/status。
+// 头位与 jusage 同款：ZCode JWT（Bearer）+ 平台 OAuth token（X-Bigmodel-Authorization）。
+func fetchResetCredits(account *Account) map[string]any {
+	client := &http.Client{Timeout: 20 * time.Second, Transport: upstreamTransportFor(account)}
+	req, err := http.NewRequest(http.MethodGet, ZCODE_ORIGIN+"/api/v1/coding-plan/reset/status", nil)
 	if err != nil {
-		return map[string]any{"error": fmt.Sprintf("上游返回非 JSON（HTTP %d）", resp.StatusCode)}
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+account.JWTToken)
+	req.Header.Set("X-Bigmodel-Authorization", account.PlatformToken)
+	req.Header.Set("Bigmodel-Target-Type", "PERSONAL")
+	req.Header.Set("Accept", "application/json")
+	res, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer res.Body.Close()
+	data, err := JSONDecode(readAllHTTP(res))
+	if err != nil {
+		return nil
 	}
 	dict, ok := data.(map[string]any)
 	if !ok {
-		return map[string]any{"error": "上游返回结构异常"}
+		return nil
 	}
-	if code, isErr := BusinessCode(dict); isErr {
-		return map[string]any{
-			"error": func() string {
-				if msg := DictGetStr(dict, "msg", ""); msg != "" {
-					return msg
-				}
-				return fmt.Sprintf("业务错误 code=%d", code)
-			}(),
-			"code": code,
+	if code, isErr := BusinessCode(dict); isErr && code != 0 {
+		return nil
+	}
+	root := dictDict(dict, "data")
+	if root == nil {
+		return nil
+	}
+	count := func(key string) (int, float64) {
+		arr, _ := root[key].([]any)
+		n, earliest := 0, 0.0
+		for _, raw := range arr {
+			item, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			ms, ok := AsFloat(item["expire_at"])
+			if !ok || ms <= 0 {
+				continue
+			}
+			n++
+			if earliest == 0 || ms < earliest {
+				earliest = ms
+			}
+		}
+		return n, earliest
+	}
+	n5, e5 := count("available_five_hour_resets")
+	nw, ew := count("available_week_resets")
+	return map[string]any{"five_hour": n5, "weekly": nw, "five_hour_next": e5, "weekly_next": ew}
+}
+
+// readAllHTTP 读完响应体。
+func readAllHTTP(res *http.Response) string {
+	buf := &strings.Builder{}
+	tmp := make([]byte, 32*1024)
+	for {
+		n, err := res.Body.Read(tmp)
+		if n > 0 {
+			buf.Write(tmp[:n])
+		}
+		if err != nil {
+			break
 		}
 	}
-	if resp.StatusCode >= 400 {
-		return map[string]any{"error": fmt.Sprintf("HTTP %d", resp.StatusCode)}
+	return buf.String()
+}
+
+// dictDict 取 map 里嵌套 map（nil 安全）。
+func dictDict(m map[string]any, key string) map[string]any {
+	v, _ := m[key].(map[string]any)
+	return v
+}
+
+// codingTier 套餐档位名归一（对齐 zsw tier_from_level）。
+func codingTier(level string) string {
+	l := strings.ToLower(level)
+	switch {
+	case strings.Contains(l, "max"):
+		return "Max"
+	case strings.Contains(l, "pro"):
+		return "Pro"
+	case strings.Contains(l, "lite"):
+		return "Lite"
 	}
-	return map[string]any{"limits": normalizeLimits(dict), "raw": dict}
+	return level
+}
+
+// codingExpire 从订阅条目提取有效期（候选键对齐 zsw extract_expire）。
+func codingExpire(obj map[string]any) string {
+	keys := []string{"nextRenewTime", "expireTime", "expire_time", "endTime", "end_time",
+		"expireAt", "expiredTime", "validEndTime", "expires_at", "expiresAt", "expired_at",
+		"period_end", "valid"}
+	for _, k := range keys {
+		v, ok := obj[k]
+		if !ok || v == nil {
+			continue
+		}
+		if f, ok := AsFloat(v); ok {
+			if f > 1e12 { // 毫秒时间戳
+				return time.Unix(int64(f)/1000, 0).Format("2006-01-02")
+			}
+			if f > 1e9 { // 秒时间戳
+				return time.Unix(int64(f), 0).Format("2006-01-02")
+			}
+			continue
+		}
+		if sv, ok := v.(string); ok { // "2027-09-28 10:07:00" 等日期字符串
+			sv = strings.TrimSpace(sv)
+			if strings.HasPrefix(sv, "20") && len(sv) >= 10 {
+				return sv[:10]
+			}
+		}
+	}
+	return ""
+}
+
+// normalizeCodingItems monitor limits → 展示条目（字段映射对齐 zsw normalize_quota_limit：
+// total=usage、used=currentValue、重置=nextResetTime(ms)、周期=unit×number）。
+func normalizeCodingItems(data map[string]any) []any {
+	out := []any{}
+	dataDict := dictDict(data, "data")
+	var limits []any
+	if dataDict != nil {
+		limits, _ = dataDict["limits"].([]any)
+	}
+	for _, rawItem := range limits {
+		item, ok := rawItem.(map[string]any)
+		if !ok {
+			continue
+		}
+		typ := DictGetStr(item, "type", "")
+		unit, _ := AsFloat(item["unit"])
+		number, _ := AsFloat(item["number"])
+		total, _ := AsFloat(item["usage"])
+		used, _ := AsFloat(item["currentValue"])
+		remaining, _ := AsFloat(item["remaining"])
+		pct, hasPct := AsFloat(item["percentage"])
+		if !hasPct && total > 0 {
+			pct = used / total * 100
+		}
+		window := "每周期"
+		switch int(unit) {
+		case 3:
+			window = fmt.Sprintf("每 %g 小时", number)
+		case 4:
+			window = "每天"
+		case 5:
+			window = "每月"
+		case 6:
+			window = "每周"
+		}
+		name := typ
+		switch typ {
+		case "CREDIT_LIMIT":
+			name = "Credits（" + window + "）"
+		case "TOKENS_LIMIT":
+			name = "Tokens（" + window + "）"
+		case "TIME_LIMIT":
+			name = "使用时长（" + window + "）"
+		case "PROMPT_LIMIT":
+			name = "提示次数（" + window + "）"
+		}
+		reset := ""
+		resetMs, _ := AsFloat(item["nextResetTime"])
+		if resetMs > 0 {
+			reset = time.Unix(int64(resetMs)/1000, 0).Format("01-02 15:04")
+		}
+		out = append(out, map[string]any{
+			"name":      name,
+			"window":    window,
+			"total":     total,
+			"used":      used,
+			"remaining": remaining,
+			"pct":       pct,
+			"reset":     reset,
+			"reset_ms":  resetMs,
+		})
+	}
+	return out
 }
 
 // RefreshAccounts 并发刷新一批账号，返回汇总。
@@ -635,13 +902,21 @@ func (m *QuotaMonitor) loop() {
 	}
 }
 
-// directTransport trust_env=False 语义的 Transport（直连，忽略环境代理）。
-func directTransport() *http.Transport {
-	return &http.Transport{
-		Proxy:                 nil,
+// upstreamTransportFor 上游官方端点统一 Transport：该账号生效的显式代理
+// （账号级 > 全局 ZCODE_UPSTREAM_PROXY，见 proxy.go），保持「验证码出口 ==
+// 请求出口」；未配置保持 trust_env=False 直连。
+func upstreamTransportFor(account *Account) *http.Transport {
+	t := &http.Transport{
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   15 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
+	if raw := ProxyRawForAccount(account); raw != "" {
+		t.Proxy = ProxyFuncForRaw(raw)
+	}
+	return t
 }
+
+// upstreamTransport 无账号上下文（版本清单等全局请求）的 Transport。
+func upstreamTransport() *http.Transport { return upstreamTransportFor(nil) }

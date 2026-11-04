@@ -87,9 +87,14 @@ func proxyMap() map[string]string {
 
 // ProxyURL 该目标会用的代理地址；`""` 表示无代理可走。
 //
-// httpx 按 (端口, host 长度, scheme 长度) 排序取最具体的一条，所以
-// scheme 专属条目优先于 `ALL_PROXY`。不传目标时按 https 取。
+// 显式配置 ZCODE_UPSTREAM_PROXY 时优先返回它（NO_PROXY 的命中判定在
+// EgressFor/ProxyFuncFor 里做）。否则对齐 httpx：按 (端口, host 长度,
+// scheme 长度) 排序取最具体的一条，scheme 专属条目优先于 `ALL_PROXY`。
+// 不传目标时按 https 取。
 func ProxyURL(urlOrHost string) string {
+	if raw := UpstreamProxyRaw(); raw != "" {
+		return raw
+	}
 	hosts := proxyMap()
 	scheme := "https"
 	if urlOrHost != "" {

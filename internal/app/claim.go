@@ -328,7 +328,7 @@ func billingRequest(account *Account, method, path string, opts *billingReqOpts)
 		req.Header.Set(k, v)
 	}
 	// trust_env=False 直连（对齐 httpx.AsyncClient(trust_env=False)）
-	client := &http.Client{Timeout: 25 * time.Second, Transport: directTransport()}
+	client := &http.Client{Timeout: 25 * time.Second, Transport: upstreamTransportFor(account)}
 	res, err := client.Do(req)
 	if err != nil {
 		// 连接/超时等网络故障统一转业务错误：路由层只需面对 ClaimError 一种失败
@@ -390,7 +390,7 @@ func ReportActivationEvents(account *Account) string {
 		return "JWT 无 user_id，跳过激活上报"
 	}
 	for _, element := range ActivationElements() {
-		if err := PostActivationEvent(profile, userID, element, 0); err != nil {
+		if err := PostActivationEvent(account, profile, userID, element, 0); err != nil {
 			return activationErrText(element, err)
 		}
 	}

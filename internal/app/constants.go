@@ -23,7 +23,7 @@ const (
 	ZCODE_ORIGIN   = "https://zcode.z.ai"
 	// API Key 通道（回退 / bigmodel 同形）：api.z.ai 的 anthropic 兼容端点
 	ZAI_API_ORIGIN = "https://api.z.ai"
-	// bigmodel（智谱开放平台）anthropic 兼容端点
+	// bigmodel（智谱开放平台）anthropic 兼容端点 + monitor 额度/订阅端点
 	BIGMODEL_ORIGIN = "https://open.bigmodel.cn"
 )
 

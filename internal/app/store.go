@@ -140,7 +140,6 @@ func (s *Store) initDB() {
 	mustExec(fmt.Sprintf("INSERT OR IGNORE INTO %s (key, value) VALUES ('admin_key', ?)", tblMeta), DEFAULT_ADMIN_KEY)
 	mustExec(fmt.Sprintf("INSERT OR IGNORE INTO %s (key, value) VALUES ('gateway_key', '')", tblMeta))
 	mustExec(fmt.Sprintf("INSERT OR IGNORE INTO %s (key, value) VALUES ('quota_refresh_interval', ?)", tblMeta), strconv.Itoa(QUOTA_REFRESH_INTERVAL))
-	mustExec(fmt.Sprintf("INSERT OR IGNORE INTO %s (key, value) VALUES ('account_concurrency', ?)", tblMeta), strconv.Itoa(ACCOUNT_CONCURRENCY))
 	mustExec(fmt.Sprintf("INSERT OR IGNORE INTO %s (key, value) VALUES ('claim_round_interval', ?)", tblMeta), strconv.Itoa(CLAIM_ROUND_INTERVAL))
 }
 
@@ -164,7 +163,6 @@ func (s *Store) load() {
 	setDefault("admin_key", DEFAULT_ADMIN_KEY)
 	setDefault("gateway_key", "")
 	setDefault("quota_refresh_interval", strconv.Itoa(QUOTA_REFRESH_INTERVAL))
-	setDefault("account_concurrency", strconv.Itoa(ACCOUNT_CONCURRENCY))
 	setDefault("claim_round_interval", strconv.Itoa(CLAIM_ROUND_INTERVAL))
 
 	s.accounts = map[string][]*Account{}
@@ -284,18 +282,6 @@ func (s *Store) QuotaRefreshInterval() int {
 	return v
 }
 
-// AccountConcurrency 单账号并发上限（0 = 不限）。运行时可改（meta 表），改后即生效。
-func (s *Store) AccountConcurrency() int {
-	v, ok := AsInt(s.GetSetting("account_concurrency", ACCOUNT_CONCURRENCY))
-	if !ok {
-		return ACCOUNT_CONCURRENCY
-	}
-	if v < 0 {
-		v = 0
-	}
-	return v
-}
-
 // ClaimRoundInterval 套餐自动领取轮间隔（0 = 关闭）。运行时可改（meta 表），改后即生效。
 func (s *Store) ClaimRoundInterval() int {
 	v, ok := AsInt(s.GetSetting("claim_round_interval", CLAIM_ROUND_INTERVAL))
@@ -408,8 +394,8 @@ func (s *Store) AddAccount(provider, name, secret string) (*Account, error) {
 			return a, nil // 跳过重复 token
 		}
 	}
-	assignFingerprint(account)                        // 入池即分配独立设备指纹
-	account.InstallID = uuidx.New4()                  // 安装身份：稳定安装令牌
+	assignFingerprint(account)       // 入池即分配独立设备指纹
+	account.InstallID = uuidx.New4() // 安装身份：稳定安装令牌
 	s.accounts[provider] = append(s.accounts[provider], account)
 	s.persistAccount(account)
 	return account, nil
@@ -567,16 +553,56 @@ func (s *Store) ImportAccounts(payload map[string]any) int {
 				continue
 			}
 			name := DictGetStr(it, "name", provider)
-			if _, err := s.AddAccount(provider, name, secret); err == nil {
-				count++
+			acc, err := s.AddAccount(provider, name, secret)
+			if err != nil {
+				continue
 			}
+			changed := false
+			// JWT 账号可同时持有 API Key 回退凭证（与 OAuth 登录后异步回填同语义）
+			if apiKey, ok := it["apiKey"].(string); ok && apiKey != "" &&
+				acc.Mode == "jwt" && acc.APIKey == "" && apiKey != secret {
+				acc.APIKey = apiKey
+				s.UpdateAccount(acc)
+			}
+			// 双 token（重置卡 /reset/status 用）：zcode_jwt 存 JWTToken（不改 mode），
+			// platform_token 仅 bigmodel 等；zai 账号的 JWTToken 已由 secret 承载
+			if zj, ok := it["zcode_jwt"].(string); ok && zj != "" && acc.JWTToken == "" {
+				acc.JWTToken = zj
+				changed = true
+			}
+			if pt, ok := it["platform_token"].(string); ok && pt != "" && acc.PlatformToken == "" {
+				acc.PlatformToken = pt
+				changed = true
+			}
+			if changed {
+				s.UpdateAccount(acc)
+			}
+			count++
 		}
 	}
 	return count
 }
 
+// AutoRouteEnabled 跨 provider 自动路由开关（默认开）：开 = 目标家打不了时
+// 自动换另一家重试；关 = 仅按显式标记（bigmodel/ 前缀 / x-provider 头）路由。
+func (s *Store) AutoRouteEnabled() bool {
+	return s.GetSetting("auto_route", "true") == "true"
+}
+
+// HasSelectable 该 provider 是否存在可选账号（自动路由判定用）。
+func (s *Store) HasSelectable(provider string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, a := range s.accounts[provider] {
+		if a.IsSelectable(0) {
+			return true
+		}
+	}
+	return false
+}
+
 // DefaultStore 全局单例（对齐 Python `store = Store()`）。由 InitStore 显式初始化
-//（Go 包级变量初始化顺序不保证 settings.init 先行，显式化避免隐式时序坑；
+// （Go 包级变量初始化顺序不保证 settings.init 先行，显式化避免隐式时序坑；
 // 命名对齐 http.DefaultXxx 惯例——类型 Store 与单例同名会破坏方法表达式调用）。
 var DefaultStore *Store
 

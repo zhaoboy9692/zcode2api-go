@@ -88,7 +88,7 @@
 |-----------|------|
 | `GET /admin/api/monitoring` | 内存环形请求日志（最新在前，KEEP=500，重启清零） |
 | `POST /admin/api/monitoring/clear` | 清空监控 |
-| `GET /admin/api/settings` | 不回明文密钥。返回 `admin_key_set` / `admin_key_masked` / `admin_key_is_default`、`gateway_key_set` / `gateway_key_masked`、`quota_refresh_interval`、`account_concurrency` |
+| `GET /admin/api/settings` | 不回明文密钥。返回 `admin_key_set` / `admin_key_masked` / `admin_key_is_default`、`gateway_key_set` / `gateway_key_masked`、`quota_refresh_interval` |
 | `PUT /admin/api/settings` | 改密钥、刷新间隔、并发上限（改后即生效，落 meta 表；并发 0 = 不限）。前端回填的掩码（含 `…` 或 `••••`）忽略不覆盖；网关 key 传空字符串表示关闭校验 |
 
 ### 探活
@@ -101,7 +101,7 @@
 
 - 入池按 `{provider}:{credentialString}` 幂等（重复添加返回既有账号）。
 - 领取操作同一账号同时只有一个在途（调度器互斥）。
-- 请求调度单账号并发上限默认 2（`account_concurrency` 设置，0 = 不限）；满号不排队，直接跳下一个可选账号，全部满/无号返回 503。
+- 请求调度单账号并发上限为**账号级字段**（账号 `concurrency`，默认 1，0 = 不限，后台账号池面板可单独修改）；满号不排队，直接跳下一个可选账号，全部满/无号返回 503。
 - `POST /admin/api/accounts` 与 OAuth 回调并发入池：以 SQLite 写锁 + upsert 保证一致。
 - 网关转发无上游超时（与 ZCode 桌面行为一致）；客户端断开 → 取消上游流（`httpx` stream close）。
 

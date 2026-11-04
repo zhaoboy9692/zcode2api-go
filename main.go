@@ -1,6 +1,7 @@
 // ZCode Hub（zcode2api-go）
 //
 // 用法:
+//
 //	zcode2api-go serve [--port 3000]        启动网关 + 后台 UI
 //	zcode2api-go login zai [--no-browser]   通过 OAuth 登录 Z.AI 并自动加入账号池
 //	zcode2api-go add-account zai <name> <jwt|key>   添加轮询账号
@@ -40,12 +41,12 @@ const cliUsage = `ZCode Hub
   zcode2api-go status                     查看配置概览
   zcode2api-go set-admin-key <key>        设置后台密码
   zcode2api-go export [file]              导出账号
-  zcode2api-go import <file>              导入账号
+  zcode2api-go import <file> [--password <pw>]   导入账号（明文 JSON 或 .zsb 加密封包）
 `
 
 // C 对齐 CLI 色表
 var C = map[string]string{
-	"reset":  "\033[0m", "green": "\033[32m", "yellow": "\033[33m",
+	"reset": "\033[0m", "green": "\033[32m", "yellow": "\033[33m",
 	"blue": "\033[34m", "red": "\033[31m", "cyan": "\033[36m", "bold": "\033[1m",
 }
 
@@ -384,11 +385,22 @@ func cmdExport(args []string) {
 }
 
 func cmdImport(args []string) {
-	if len(args) == 0 {
-		fmt.Println(c("格式: zcode2api-go import <file>", "red"))
+	// --password <pw>：仅 .zsb 加密封包需要；回落环境变量 ZSW_PASSWORD / ZCODE_BUNDLE_PASSWORD
+	password := ""
+	files := []string{}
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--password" && i+1 < len(args) {
+			password = args[i+1]
+			i++
+			continue
+		}
+		files = append(files, args[i])
+	}
+	if len(files) == 0 {
+		fmt.Println(c("格式: zcode2api-go import <file> [--password <pw>]", "red"))
 		return
 	}
-	raw, err := os.ReadFile(args[0])
+	raw, err := os.ReadFile(files[0])
 	if err != nil {
 		fmt.Println(c(fmt.Sprintf("读取失败: %v", err), "red"))
 		return
@@ -398,17 +410,50 @@ func cmdImport(args []string) {
 		fmt.Println(c(fmt.Sprintf("解析失败: %v", err), "red"))
 		return
 	}
+	// .zsb 加密封包（is_sealed：kdf + cipher 同时存在）：解封后转成 providers 形态再入池
+	if app.IsSealedBundle(payload) {
+		if password == "" {
+			password = os.Getenv("ZSW_PASSWORD")
+		}
+		if password == "" {
+			password = os.Getenv("ZCODE_BUNDLE_PASSWORD")
+		}
+		if strings.TrimSpace(password) == "" {
+			fmt.Println(c("该文件是 .zsb 加密封包：请加 --password <pw>，或设置环境变量 ZSW_PASSWORD", "red"))
+			return
+		}
+		inner, err := app.OpenZsbBundle(payload, password)
+		if err != nil {
+			fmt.Println(c(fmt.Sprintf("解封失败: %v", err), "red"))
+			return
+		}
+		total := 0
+		if accs, ok := inner["accounts"].([]any); ok {
+			total = len(accs)
+		}
+		payload = app.ZsbToProviders(inner)
+		fmt.Println(c(fmt.Sprintf("✔ .zsb 已解封（%d 个账号）", total), "green"))
+	}
 	existing := map[string]bool{}
 	for _, a := range app.DefaultStore.ListAccounts("") {
 		existing[a.ID] = true
 	}
 	count := app.DefaultStore.ImportAccounts(payload)
+	added := 0
 	for _, a := range app.DefaultStore.ListAccounts("") {
 		if !existing[a.ID] {
-			cliIngestFollowup(a)
+			added++
+			if a.Provider == "zai" {
+				cliIngestFollowup(a)
+			}
 		}
 	}
-	fmt.Println(c(fmt.Sprintf("✔ 已导入 %d 个账号", count), "green"))
+	// 口径：count = 处理数（含重复 token 去重命中）；重复的不会重复入池
+	if added < count {
+		fmt.Println(c(fmt.Sprintf("✔ 已导入 %d 个账号（新增 %d，重复跳过 %d）", count, added, count-added), "green"))
+	} else {
+		fmt.Println(c(fmt.Sprintf("✔ 已导入 %d 个账号", count), "green"))
+	}
 }
 
 // ── 分发 ─────────────────────────────────────────────────────────────────────

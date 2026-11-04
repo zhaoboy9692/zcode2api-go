@@ -69,6 +69,25 @@ try {
   process.exit(3);
 }
 
+// parseProxyEnv 代理 env → { server: 无凭据 --proxy-server 值, auth: {username,password}|null }
+// http://user:pass@host:port → server="http://host:port"，凭据走 page.authenticate；
+// socks5://user:pass@… 正常不应到这里（hub 侧已换本地免鉴权中继），兜底剥凭据并提示。
+function parseProxyEnv(raw) {
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    const auth = u.username || u.password
+      ? { username: decodeURIComponent(u.username || ""), password: decodeURIComponent(u.password || "") }
+      : null;
+    if (auth && u.protocol === "socks5:") {
+      process.stderr.write("[pw] 带凭据 SOCKS 代理未被中继替换，Chromium 不支持 SOCKS 鉴权，凭据将被忽略\n");
+    }
+    return { server: u.protocol + "//" + u.host, auth: auth && u.protocol !== "socks5:" ? auth : null };
+  } catch {
+    return { server: raw, auth: null }; // 非 URL 形态，原样交给 --proxy-server
+  }
+}
+
 // 对齐 hub 账号档案（win32-x64）——UA/平台与 billing 头一致，避免自相矛盾的风控信号。
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36";
@@ -76,7 +95,9 @@ const UA =
 const PAGE_URL = "file://" + path.join(__dirname, "page.html");
 
 // 内存紧张形态下的 Chromium 启动参数（pxed 实测唯一能跑通的组合）
-function chromeArgs(proxy) {
+// proxyServer：无凭据的 --proxy-server 值（userinfo 由 page.authenticate 回填，
+// Chromium 的 --proxy-server 不接受也不解析凭据）
+function chromeArgs(proxyServer) {
   const args = [
     "--no-sandbox", "--disable-dev-shm-usage",
     "--disable-blink-features=AutomationControlled",
@@ -89,7 +110,7 @@ function chromeArgs(proxy) {
     "--memory-pressure-off", "--disable-background-timer-throttling",
     "--disable-renderer-backgrounding", "--disable-backgrounding-occluded-windows",
   ];
-  if (proxy) args.push("--proxy-server=" + proxy);
+  if (proxyServer) args.push("--proxy-server=" + proxyServer);
   return args;
 }
 
@@ -117,7 +138,7 @@ function oomWatchdog(pid) {
     process.stderr.write("[pw] 未找到可执行 Chromium（设 ZCODE_CHROMIUM_PATH）\n");
     process.exit(3);
   }
-  const proxy = process.env.HTTP_PROXY || process.env.HTTPS_PROXY || "";
+  const proxy = parseProxyEnv(process.env.HTTP_PROXY || process.env.HTTPS_PROXY || "");
 
   // --single-process 在共享小内存盒上约有一半概率闪退/启动失败（好坏窗口交替，
   // 与代理无关；dmesg 实证是 OOM killer 按 chrome 自设的 adj=800 优先杀它）。
@@ -159,6 +180,11 @@ async function solveOnce(executablePath, proxy, scene, region, prefix) {
   const stopWatchdog = oomWatchdog(browser.process() ? browser.process().pid : process.pid);
   try {
     const page = await browser.newPage();
+    if (proxy && proxy.auth) {
+      // http(s) 代理带凭据：Chromium --proxy-server 不支持鉴权，由 CDP 回填
+      dbg("proxy auth: user=" + proxy.auth.username);
+      await page.authenticate(proxy.auth);
+    }
     await page.setUserAgent(UA, {
       architecture: "x86", bitness: "64", mobile: false, model: "",
       platform: "Windows", platformVersion: "10.0.0", wow64: false,

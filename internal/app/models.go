@@ -161,15 +161,15 @@ type Account struct {
 
 	// 额度快照：{ model_show_name: {total, used, remaining, expires_at} }
 	Quota map[string]any `json:"quota"`
-	Plan  map[string]any `json:"plan"`    // 当前激活方案（billing/current plans[0]，兼容保留）
-	Plans []any          `json:"plans"`   // 全部方案（上游 plans 数组；多套餐时 entitlements 不丢）
-	Usage map[string]any `json:"usage"`   // 近期用量原始数据
+	Plan  map[string]any `json:"plan"`  // 当前激活方案（billing/current plans[0]，兼容保留）
+	Plans []any          `json:"plans"` // 全部方案（上游 plans 数组；多套餐时 entitlements 不丢）
+	Usage map[string]any `json:"usage"` // 近期用量原始数据
 
-	UseCount     int  `json:"use_count"`
-	FailCount    int  `json:"fail_count"`
-	RiskStrikes  int  `json:"risk_strikes"` // 当前风控退避周期内累计命中次数；成功或跨衰减窗口即清零
-	LastRiskAt   *float64 `json:"last_risk_at"` // 最近一次风控命中时间（strikes 衰减窗口基准）
-	RecentResults []any `json:"recent_results"` // 最近请求结果 tick（True 成功/False 失败），最新在末尾
+	UseCount      int      `json:"use_count"`
+	FailCount     int      `json:"fail_count"`
+	RiskStrikes   int      `json:"risk_strikes"`   // 当前风控退避周期内累计命中次数；成功或跨衰减窗口即清零
+	LastRiskAt    *float64 `json:"last_risk_at"`   // 最近一次风控命中时间（strikes 衰减窗口基准）
+	RecentResults []any    `json:"recent_results"` // 最近请求结果 tick（True 成功/False 失败），最新在末尾
 	LastUsedAt    *float64 `json:"last_used_at"`
 	LastCheckedAt *float64 `json:"last_checked_at"`
 	// 额度快照的「可信时间」：只在 billing/balance **成功取到数据**、quota 被真正
@@ -184,6 +184,18 @@ type Account struct {
 	// 安装身份：入池分配的稳定安装令牌（hub 内部，跨账号不重复，导出时剥离）
 	InstallID   string   `json:"install_id"`
 	InstalledAt *float64 `json:"installed_at"` // 按账号安装序完成时间；nil = 未安装
+	// 出站代理（账号级）：空 = 跟随全局 ZCODE_UPSTREAM_PROXY，再退 env/直连。
+	// 形态 http(s)://user:pass@host:port / socks5(h)://user:pass@host:port；
+	// 验证码 token 按此代理的出口隔离签发（见 captcha.go 出口标签）。
+	Proxy string `json:"proxy"`
+	// Coding 平面额度快照（monitor 端点，见 quota.go FetchCodingLimits）：
+	// {items:[{name,window,total,used,remaining,pct,reset}], tier, expire, refreshed_at}
+	CodingLimits map[string]any `json:"coding_limits"`
+	// 平台 OAuth token（oauth:{provider}:access_token 的解密形态）：仅用于
+	// /coding-plan/reset/status 的 X-Bigmodel-Authorization 头；不对外回显
+	PlatformToken string `json:"platform_token"`
+	// 网关并发上限（账号级，可单独设置）：≥1 = 上限；0 = 不限；缺省 1
+	Concurrency int `json:"concurrency"`
 }
 
 // AccountCreate 对齐 Account.create(provider, name, secret)。
@@ -191,17 +203,18 @@ func AccountCreate(provider, name, secret string) *Account {
 	secret = strings.TrimSpace(secret)
 	isJWT := strings.Count(secret, ".") == 2 && provider == "zai"
 	acc := &Account{
-		ID:       accountID(name),
-		Provider: provider,
-		Mode:     "apiKey",
-		Enabled:  true,
-		Status:   StatusActive,
-		Quota:    map[string]any{},
-		Plan:     map[string]any{},
-		Plans:    []any{},
-		Usage:    map[string]any{},
+		ID:            accountID(name),
+		Provider:      provider,
+		Mode:          "apiKey",
+		Enabled:       true,
+		Status:        StatusActive,
+		Concurrency:   1,
+		Quota:         map[string]any{},
+		Plan:          map[string]any{},
+		Plans:         []any{},
+		Usage:         map[string]any{},
 		RecentResults: []any{},
-		CreatedAt: NowFloat(),
+		CreatedAt:     NowFloat(),
 	}
 	if name != "" {
 		acc.Name = name
@@ -231,7 +244,7 @@ func (a *Account) Secret() string {
 // 实测（2026-10-01）上游对 messages 端点的 3012 是频道级瞬时频控：
 // 同号同刻 billing 全部正常、数小时自愈——硬禁用会让健康的 billing/claim
 // 陪葬（领取轮两度因此停摆）。冷却自动恢复且冷却期零上游流量
-//（is_cooling 全通道门禁），既避免对真封禁账号持续施压，也不拖死领取轮。
+// （is_cooling 全通道门禁），既避免对真封禁账号持续施压，也不拖死领取轮。
 //
 // strikes 仅在 decay_seconds 窗口内累计：距上次命中超过窗口视为无关的
 // 新事件，重新起算——避免跨月偶发命中累积成禁用。Plan 通道成功（gateway
@@ -470,32 +483,36 @@ func (a *Account) PlanKind() string {
 // 数值统一 float64/int；None 字段以 nil 表达（*float64 nil → nil）。
 func (a *Account) ToDict() map[string]any {
 	return map[string]any{
-		"id":               a.ID,
-		"name":             a.Name,
-		"provider":         a.Provider,
-		"mode":             a.Mode,
-		"jwt_token":        strOrNil(a.JWTToken),
-		"api_key":          strOrNil(a.APIKey),
-		"enabled":          a.Enabled,
-		"status":           a.Status,
-		"quota":            dictOrNil(a.Quota),
-		"plan":             dictOrNil(a.Plan),
-		"plans":            listOrNil(a.Plans),
-		"usage":            dictOrNil(a.Usage),
-		"use_count":        a.UseCount,
-		"fail_count":       a.FailCount,
-		"risk_strikes":     a.RiskStrikes,
-		"last_risk_at":     fOrNil(a.LastRiskAt),
-		"recent_results":   listOrNil(a.RecentResults),
-		"last_used_at":     fOrNil(a.LastUsedAt),
-		"last_checked_at":  fOrNil(a.LastCheckedAt),
+		"id":                a.ID,
+		"name":              a.Name,
+		"provider":          a.Provider,
+		"mode":              a.Mode,
+		"jwt_token":         strOrNil(a.JWTToken),
+		"api_key":           strOrNil(a.APIKey),
+		"enabled":           a.Enabled,
+		"status":            a.Status,
+		"quota":             dictOrNil(a.Quota),
+		"plan":              dictOrNil(a.Plan),
+		"plans":             listOrNil(a.Plans),
+		"usage":             dictOrNil(a.Usage),
+		"use_count":         a.UseCount,
+		"fail_count":        a.FailCount,
+		"risk_strikes":      a.RiskStrikes,
+		"last_risk_at":      fOrNil(a.LastRiskAt),
+		"recent_results":    listOrNil(a.RecentResults),
+		"last_used_at":      fOrNil(a.LastUsedAt),
+		"last_checked_at":   fOrNil(a.LastCheckedAt),
 		"quota_verified_at": fOrNil(a.QuotaVerifiedAt),
-		"cooling_until":    fOrNil(a.CoolingUntil),
-		"last_error":       strOrNil(a.LastError),
-		"created_at":       a.CreatedAt,
-		"fingerprint":      dictOrNil(a.Fingerprint),
-		"install_id":       strOrNil(a.InstallID),
-		"installed_at":     fOrNil(a.InstalledAt),
+		"cooling_until":     fOrNil(a.CoolingUntil),
+		"last_error":        strOrNil(a.LastError),
+		"created_at":        a.CreatedAt,
+		"fingerprint":       dictOrNil(a.Fingerprint),
+		"install_id":        strOrNil(a.InstallID),
+		"installed_at":      fOrNil(a.InstalledAt),
+		"proxy":             strOrNil(a.Proxy),
+		"coding_limits":     dictOrNil(a.CodingLimits),
+		"platform_token":    strOrNil(a.PlatformToken),
+		"concurrency":       a.Concurrency,
 	}
 }
 
@@ -531,10 +548,10 @@ func fOrNil(p *float64) any {
 // 输入为 UseNumber 解析产物；None/缺失字段保持零值。
 func AccountFromDict(data map[string]any) *Account {
 	a := &Account{
-		Quota: map[string]any{},
-		Plan:  map[string]any{},
-		Plans: []any{},
-		Usage: map[string]any{},
+		Quota:         map[string]any{},
+		Plan:          map[string]any{},
+		Plans:         []any{},
+		Usage:         map[string]any{},
 		RecentResults: []any{},
 	}
 	if v, ok := data["id"].(string); ok {
@@ -609,6 +626,21 @@ func AccountFromDict(data map[string]any) *Account {
 		a.InstallID = v
 	}
 	a.InstalledAt = floatPtr(data["installed_at"])
+	if v, ok := data["proxy"].(string); ok {
+		a.Proxy = strings.TrimSpace(v)
+	}
+	if v, ok := data["coding_limits"].(map[string]any); ok && v != nil {
+		a.CodingLimits = v
+	}
+	if v, ok := data["platform_token"].(string); ok {
+		a.PlatformToken = v
+	}
+	// 并发上限：旧数据缺字段 → 默认 1；显式 0 = 不限
+	if v, ok := AsInt(data["concurrency"]); ok {
+		a.Concurrency = v
+	} else {
+		a.Concurrency = 1
+	}
 	return a
 }
 
@@ -641,23 +673,23 @@ func (a *Account) PublicView() map[string]any {
 		masked = secret[:8] + "…" + secret[len(secret)-6:]
 	}
 	return map[string]any{
-		"id":           a.ID,
-		"name":         a.Name,
-		"provider":     a.Provider,
-		"mode":         a.Mode,
-		"token_masked": masked,
-		"enabled":      a.Enabled,
-		"status":       a.EffectiveStatus(0),
-		"quota":        dictOrNil(a.Quota),
-		"plan":         dictOrNil(a.Plan),
-		"plans":        listOrNil(a.Plans),
-		"plan_kind":    a.PlanKind(),
-		"use_count":    a.UseCount,
-		"fail_count":   a.FailCount,
-		"risk_strikes": a.RiskStrikes,
-		"recent_results": listOrNil(a.RecentResults),
-		"last_used_at":    fOrNil(a.LastUsedAt),
-		"last_checked_at": fOrNil(a.LastCheckedAt),
+		"id":                a.ID,
+		"name":              a.Name,
+		"provider":          a.Provider,
+		"mode":              a.Mode,
+		"token_masked":      masked,
+		"enabled":           a.Enabled,
+		"status":            a.EffectiveStatus(0),
+		"quota":             dictOrNil(a.Quota),
+		"plan":              dictOrNil(a.Plan),
+		"plans":             listOrNil(a.Plans),
+		"plan_kind":         a.PlanKind(),
+		"use_count":         a.UseCount,
+		"fail_count":        a.FailCount,
+		"risk_strikes":      a.RiskStrikes,
+		"recent_results":    listOrNil(a.RecentResults),
+		"last_used_at":      fOrNil(a.LastUsedAt),
+		"last_checked_at":   fOrNil(a.LastCheckedAt),
 		"quota_verified_at": fOrNil(a.QuotaVerifiedAt),
 		// 轮询是否会选中它（额度判死/冷却/停用都在这里体现）：后台排障时
 		// 「状态 active 但不发请求」最常见的原因就是这一项为 false
@@ -665,9 +697,19 @@ func (a *Account) PublicView() map[string]any {
 		"cooling_until": fOrNil(a.CoolingUntil),
 		"last_error":    strOrNil(a.LastError),
 		"created_at":    a.CreatedAt,
-		"fingerprint":   func() any { if v := a.FingerprintView(); v != nil { return v }; return nil }(),
-		"install_id":    strOrNil(a.InstallID),
-		"installed_at":  fOrNil(a.InstalledAt),
+		"fingerprint": func() any {
+			if v := a.FingerprintView(); v != nil {
+				return v
+			}
+			return nil
+		}(),
+		"install_id":   strOrNil(a.InstallID),
+		"installed_at": fOrNil(a.InstalledAt),
+		// 出站代理回显（用户自填配置，非上游凭证，不脱敏；前端折叠框编辑用）
+		"proxy": strOrNil(a.Proxy),
+		// Coding 平面额度快照（monitor 端点；bigmodel 账号的主账本）
+		"coding":      dictOrNil(a.CodingLimits),
+		"concurrency": a.Concurrency,
 	}
 }
 

@@ -32,14 +32,17 @@
       <input class="input" id="gateway-key" type="password" placeholder="留空表示不启用" autocomplete="new-password">
     </div>
     <div class="settings-row">
+      <label>跨账号商自动路由</label>
+      <div class="hint">开启：目标账号商（zai / bigmodel）无可用账号时自动切换另一家重试，裸模型名即可使用；关闭：仅按显式标记路由（模型名加 <code>bigmodel/</code> 前缀或 <code>x-provider</code> 请求头）。修改后即时生效。</div>
+      <div style="display:flex;align-items:center;gap:10px;margin-top:4px">
+        <label class="switch" title="开启 / 关闭跨账号商自动路由"><input type="checkbox" id="auto-route"><span class="switch-slider"></span></label>
+        <label for="auto-route" style="cursor:pointer;font-weight:normal;margin:0">开启自动路由（推荐）</label>
+      </div>
+    </div>
+    <div class="settings-row">
       <label>额度刷新间隔（秒）</label>
       <div class="hint">后台自动刷新各账号额度与状态的周期。设为 0 关闭自动刷新（仍可手动刷新）。修改后即时生效。</div>
       <input class="input" id="quota-interval" type="number" min="0" step="5" placeholder="60">
-    </div>
-    <div class="settings-row">
-      <label>单账号并发上限</label>
-      <div class="hint">每个账号同时处理的最大请求数；某账号并发满时自动切下一个账号。设为 0 不限制。修改后即时生效。</div>
-      <input class="input" id="account-concurrency" type="number" min="0" step="1" placeholder="2">
     </div>
     <div class="settings-row">
       <label>套餐自动领取轮（秒）</label>
@@ -112,8 +115,8 @@ async function load(){
     const d=await api('GET','/settings');
     document.getElementById('admin-key').value=d.admin_key_masked||'';
     document.getElementById('gateway-key').value=d.gateway_key_masked||'';
+    document.getElementById('auto-route').checked = d.auto_route !== false;
     document.getElementById('quota-interval').value=d.quota_refresh_interval??1800;
-    document.getElementById('account-concurrency').value=d.account_concurrency??2;
     document.getElementById('claim-round-interval').value=d.claim_round_interval??3600;
     document.getElementById('claim-round-hours').value=d.claim_round_hours??'';
     const hint=document.getElementById('admin-key-default-hint');
@@ -200,17 +203,16 @@ async function saveSettings(){
   const admin_key=document.getElementById('admin-key').value.trim();
   const gateway_key=document.getElementById('gateway-key').value.trim();
   const quota_refresh_interval=parseInt(document.getElementById('quota-interval').value,10);
-  const account_concurrency=parseInt(document.getElementById('account-concurrency').value,10);
   if(!admin_key)return showToast('后台密码不能为空','error');
   if(isNaN(quota_refresh_interval)||quota_refresh_interval<0)return showToast('刷新间隔必须是非负整数','error');
-  if(isNaN(account_concurrency)||account_concurrency<0)return showToast('账号并发必须是非负整数（0 = 不限）','error');
   const claim_round_interval=parseInt(document.getElementById('claim-round-interval').value,10);
   if(isNaN(claim_round_interval)||claim_round_interval<0)return showToast('自动领取轮间隔必须是非负整数（0 = 关闭）','error');
   const claim_round_hours=document.getElementById('claim-round-hours').value.trim();
   if(claim_round_hours && claim_round_hours!=='*' &&
      !claim_round_hours.replace(/，/g,',').split(',').every(p=>{const n=parseInt(p,10);return !p.trim()||(!isNaN(n)&&n>=0&&n<=23);}))
     return showToast('领取窗口必须是 0-23 的小时，逗号分隔（留空 = 全天）','error');
-  const payload={quota_refresh_interval,account_concurrency,claim_round_interval,claim_round_hours,
+  const payload={quota_refresh_interval,claim_round_interval,claim_round_hours,
+                 auto_route:document.getElementById('auto-route').checked,
                  auto_sync_client_version:document.getElementById('auto-sync-version').checked};
   if(!_isSecretMask(admin_key)) payload.admin_key=admin_key;
   if(!_isSecretMask(gateway_key)) payload.gateway_key=gateway_key;

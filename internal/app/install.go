@@ -43,11 +43,11 @@ const installClientTimeout = 15 // 秒
 //（claim 直连）同属一条官方首启模拟链路，必须同出口——hub env 代理
 //（127.0.0.1:10822）2026-11-04 实测完全超时，走代理即「All connection
 // attempts failed」，且出口分裂本身是指纹矛盾信号。
-func installFetchClientConfigs() (map[string]any, error) {
+func installFetchClientConfigs(account *Account) (map[string]any, error) {
 	fullURL := fmt.Sprintf("%s?app_version=%s", CLIENT_CONFIGS_URL, BillingAppVersion())
 	client := &http.Client{
 		Timeout:   installClientTimeout * time.Second,
-		Transport: directTransport(),
+		Transport: upstreamTransportFor(account),
 	}
 	req, err := http.NewRequest(http.MethodGet, fullURL, nil)
 	if err != nil {
@@ -136,14 +136,14 @@ func RunInstallSequenceForAccount(account *Account) map[string]any {
 	profile := ProfileFor(account)
 	userID := ClaimJWTUserID(account)
 
-	if _, err := installFetchClientConfigs(); err != nil {
+	if _, err := installFetchClientConfigs(account); err != nil {
 		appendErr(fmt.Sprintf("client/configs 失败: %v", err))
 	} else {
 		result["configs_fetched"] = true
 	}
 
 	for _, element := range ActivationElements() {
-		if err := PostActivationEvent(profile, userID, element, installClientTimeout*time.Second); err != nil {
+		if err := PostActivationEvent(account, profile, userID, element, installClientTimeout*time.Second); err != nil {
 			appendErr(err.Error())
 		} else {
 			result["events_reported"] = append(result["events_reported"].([]any), element)
@@ -211,7 +211,7 @@ func RunInstallSequence() map[string]any {
 		DeviceMid: DeviceMid(),
 	}
 
-	if configs, err := installFetchClientConfigs(); err != nil {
+	if configs, err := installFetchClientConfigs(nil); err != nil {
 		appendErr(fmt.Sprintf("client/configs 失败: %v", err))
 	} else {
 		result["configs_fetched"] = true
@@ -219,7 +219,7 @@ func RunInstallSequence() map[string]any {
 	}
 
 	for _, element := range ActivationElements() {
-		if err := PostActivationEvent(profile, "", element, installClientTimeout*time.Second); err != nil {
+		if err := PostActivationEvent(nil, profile, "", element, installClientTimeout*time.Second); err != nil {
 			appendErr(err.Error())
 		} else {
 			result["events_reported"] = append(result["events_reported"].([]any), element)

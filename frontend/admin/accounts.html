@@ -179,7 +179,45 @@
   </div>
 </div>
 
-<input type="file" id="import-file" accept=".json" style="display:none" onchange="onImportFile(event)">
+<!-- .zsb 导入密码弹窗 -->
+<div class="modal-overlay" id="modal-import-pw">
+  <div class="modal" style="max-width:400px">
+    <div class="modal-title">导入 .zsb 加密封包</div>
+    <div class="dialog-body">
+      <div class="dialog-help" id="import-pw-hint">该文件是 .zsb 加密封包，请输入导出时设置的密码。</div>
+      <div class="dialog-field"><span class="dialog-label">密码</span><input class="input" type="password" id="import-pw-input" placeholder="导出口令" onkeydown="if(event.key==='Enter')doImportWithPassword()"></div>
+    </div>
+    <div class="dialog-actions">
+      <button onclick="closeModal('modal-import-pw')" class="dialog-btn">取消</button>
+      <button onclick="doImportWithPassword()" class="dialog-btn dialog-btn-primary">导入</button>
+    </div>
+  </div>
+</div>
+
+<style>
+.usage-panel{grid-column:1/-1;padding:12px 14px;border-top:1px dashed var(--hairline);background:var(--panel-2);display:grid;gap:10px}
+.usage-panel-title{font-size:12px;font-weight:600;color:var(--ink);display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.up-cards{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;color:#38bdf8;background:rgba(56,189,248,.1);border:1px solid rgba(56,189,248,.25);border-radius:999px;padding:2px 10px}
+.up-row{display:grid;grid-template-columns:52px minmax(120px,1fr) auto auto;gap:10px;align-items:center;font-size:12px}
+.up-period{font-size:11px;font-weight:600;color:var(--ink-mute);background:var(--panel);border:1px solid var(--hairline);border-radius:6px;padding:2px 0;text-align:center}
+.up-bar{height:8px;border-radius:999px;background:var(--hairline);overflow:hidden;position:relative}
+.up-bar i{display:block;height:100%;border-radius:999px;transition:width .3s}
+.up-val{color:var(--ink);white-space:nowrap;font-variant-numeric:tabular-nums}
+.up-pct{color:var(--ink-mute)}
+.up-reset{color:var(--ink-mute);white-space:nowrap;min-width:86px;text-align:right}
+.up-empty{font-size:12px;color:var(--ink-mute)}
+.proxy-badge{display:inline-flex;align-items:center;font-size:10px;padding:1px 6px;border-radius:999px;background:rgba(56,189,248,.12);color:#38bdf8;border:1px solid rgba(56,189,248,.25);font-weight:600;margin-left:6px;white-space:nowrap}
+.acct-row.is-open .cell.cred{opacity:.92}
+.proxy-panel{grid-column:1/-1;padding:10px 14px 12px;border-top:1px dashed var(--hairline);background:var(--panel-2);display:grid;gap:8px}
+.proxy-panel-hd{font-size:12px;font-weight:600;color:var(--ink);display:flex;align-items:center;gap:6px}
+.proxy-panel-body{display:flex;flex-wrap:wrap;gap:8px;align-items:center;max-width:420px}
+.proxy-panel .proxy-input{min-width:0;font-family:ui-monospace,Menlo,monospace;font-size:12px}
+.proxy-panel .proxy-input#proxy-input-${''}{}
+.proxy-panel,.usage-panel{position:relative;z-index:2}
+.proxy-panel .dialog-btn{flex:none}
+</style>
+
+<input type="file" id="import-file" accept=".json,.zsb" style="display:none" onchange="onImportFile(event)">
 
 <script src="/static/js/auth.js?v={{APP_VERSION}}"></script>
 <script src="/static/js/toast.js?v={{APP_VERSION}}"></script>
@@ -274,7 +312,10 @@ function renderFilters(){
 }
 function setFilter(k){curFilter=k;renderFilters();renderList();}
 
-function renderList(){
+function renderList(force){
+  // 代理输入进行中不整体重绘（5s 轮询会打断输入）；toggleProxy 走 force
+  const ae=document.activeElement;
+  if(!force&&ae&&ae.classList&&ae.classList.contains('proxy-input'))return;
   const items=curFilter==='all'?allAccounts:allAccounts.filter(a=>a.status===curFilter);
   document.getElementById('tbl-count').textContent=items.length;
   const el=document.getElementById('acct-list');
@@ -292,8 +333,9 @@ function notchColor(id){
 }
 function tierBadgeHtml(a){
   const p=a.plan||{};
-  const s=String(p.show_name||p.plan_id||'').toLowerCase();
-  let label=esc(p.show_name||p.plan_id||''),cls='other';
+  const c=a.coding||{};
+  const s=String(p.show_name||p.plan_id||c.tier||'').toLowerCase();
+  let label=esc(p.show_name||p.plan_id||c.tier||''),cls='other';
   if(s.includes('max')){label='Max';cls='max';}
   else if(s.includes('pro')&&!s.includes('preview')){label='Pro';cls='pro';}
   else if(s.includes('lite')){label='Lite';cls='lite';}
@@ -303,8 +345,9 @@ function tierBadgeHtml(a){
 
 function credCell(a){
   const isJwt=a.mode==='jwt';
+  const ac=a.concurrency==null?1:Number(a.concurrency);
   return `<div class="acct-name-line"><span class="notch" style="background:${notchColor(a.id)}"></span><span class="acct-name">${esc(a.name)}</span>${tierBadgeHtml(a)}</div>
-    <div class="cred-sub"><span class="tok">${esc(a.token_masked)}</span><span>·</span><span>${esc(a.provider)} / ${isJwt?'JWT':'API Key'}</span></div>`;
+    <div class="cred-sub"><span class="tok">${esc(a.token_masked)}</span><span>·</span><span>${esc(a.provider)} / ${isJwt?'JWT':'API Key'}</span><span class="proxy-badge" style="color:var(--amber);background:rgba(251,146,60,.1);border-color:rgba(251,146,60,.25);cursor:pointer" onclick="editConc('${a.id}')" title="点击修改该账号的并发数（默认 1，0 = 不限）">并发 ${ac===0?'不限':ac} ✎</span>${a.proxy?'<span class="proxy-badge" title="该账号走独立代理">⚡ 代理</span>':''}</div>`;
 }
 
 function statusCell(a){
@@ -313,6 +356,11 @@ function statusCell(a){
   if(a.status==='cooling'&&Number(a.cooling_until)){
     const left=Math.max(0,Math.round(Number(a.cooling_until)-Date.now()/1000));
     if(left>0)sub=`<div class="cell-sub"><span class="cool-line" title="限流冷却，${fmtDur(left)}后自动恢复">❄ ${fmtDur(left)}恢复</span></div>`;
+  }
+  if(!sub){
+    // Coding 平面套餐有效期（bigmodel 账号主账本）
+    const cExp=(a.coding||{}).expire;
+    if(cExp)sub=`<div class="cell-sub" title="Coding 套餐有效期（subscription/list）">Coding 至 ${esc(cExp)}</div>`;
   }
   if(!sub){
     // 套餐窗口：上游字段是 ends_at（unix 秒）；expires_at 为旧兼容
@@ -352,12 +400,15 @@ function usageCell(a){
 
 function actionsCell(a){
   const isJwt=a.mode==='jwt';
+  const canRefresh=isJwt||(a.provider==='bigmodel'&&a.mode==='apiKey');
   const loading=refreshing.has(a.id);
   const enabled=a.enabled!==false&&a.status!=='disabled';
   return `<div class="acct-actions">
-    ${isJwt?`<button onclick="refreshOne('${a.id}')" class="row-icon-btn${loading?' is-loading':''}" title="刷新额度"><svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.6-4.6"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.6 4.6"/><path d="M20 20v-5h-5"/></svg></button>
-    <button onclick="claimOne('${a.id}')" class="row-icon-btn${claiming.has(a.id)?' is-loading':''}" title="自动领取赠送额度"><svg viewBox="0 0 24 24"><rect x="3" y="8" width="18" height="4" rx="1"/><path d="M12 8v13"/><path d="M19 12v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-7"/><path d="M7.5 8a2.5 2.5 0 0 1 0-5C11 3 12 8 12 8s1-5 4.5-5a2.5 2.5 0 0 1 0 5"/></svg></button>
+    ${canRefresh?`<button onclick="refreshOne('${a.id}')" class="row-icon-btn${loading?' is-loading':''}" title="刷新额度"><svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.6-4.6"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.6 4.6"/><path d="M20 20v-5h-5"/></svg></button>`:''}
+    ${isJwt?`<button onclick="claimOne('${a.id}')" class="row-icon-btn${claiming.has(a.id)?' is-loading':''}" title="自动领取赠送额度"><svg viewBox="0 0 24 24"><rect x="3" y="8" width="18" height="4" rx="1"/><path d="M12 8v13"/><path d="M19 12v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-7"/><path d="M7.5 8a2.5 2.5 0 0 1 0-5C11 3 12 8 12 8s1-5 4.5-5a2.5 2.5 0 0 1 0 5"/></svg></button>
     <button onclick="openClaimModal('${a.id}')" class="row-icon-btn" title="手动领取活动套餐（浏览器过验证码）"><svg viewBox="0 0 24 24"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/><path d="m9 12 2 2 4-4"/></svg></button>`:''}
+    <button onclick="toggleUsage('${a.id}')" class="row-icon-btn${usageOpen.has(a.id)?' is-loading':''}" title="用量面板（周期聚合 · 重置倒计时）"><svg viewBox="0 0 24 24"><path d="M4 20V10"/><path d="M10 20V4"/><path d="M16 20v-8"/><path d="M22 20H2"/></svg></button>
+    <button onclick="toggleProxy('${a.id}')" class="row-icon-btn${proxyOpen.has(a.id)?' is-loading':''}" title="出站代理 / 并发（点击展开/收起）"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a15 15 0 0 1 0 18"/><path d="M12 3a15 15 0 0 0 0 18"/></svg></button>
     <button onclick="openEdit('${a.id}')" class="row-icon-btn" title="编辑"><svg viewBox="0 0 24 24"><path d="m4 20 4.5-1 9.5-9.5-3.5-3.5L5 15.5z"/><path d="m13.5 5.5 3.5 3.5"/></svg></button>
     <button onclick="doDelete('${a.id}')" class="row-icon-btn row-icon-danger" title="删除"><svg viewBox="0 0 24 24"><path d="M5 7h14"/><path d="M9 7V4h6v3"/><path d="M8 10v7"/><path d="M12 10v7"/><path d="M16 10v7"/><path d="M7 7l1 13h8l1-13"/></svg></button>
     <label class="switch" title="${enabled?'禁用账号':'启用账号'}"><input type="checkbox" ${enabled?'checked':''} onchange="toggleEnabled('${a.id}',${!enabled})"><span class="switch-slider"></span></label>
@@ -366,14 +417,196 @@ function actionsCell(a){
 
 function rowHtml(a){
   const isDisabled=a.status==='disabled';
-  return `<div class="acct-row${isDisabled?' is-disabled':''}" data-id="${a.id}">
+  const open=proxyOpen.has(a.id);
+  return `<div class="acct-row${isDisabled?' is-disabled':''}${open?' is-open':''}" data-id="${a.id}">
     <div class="cell cred">${credCell(a)}</div>
     <div class="cell status">${statusCell(a)}</div>
     <div class="cell recent"><div class="recent-ts">${fmtDateSec(a.last_used_at)}</div>${tickbarHtml(a)}</div>
     <div class="cell usage">${usageCell(a)}</div>
     <div class="cell quota">${quotaCell(a)}</div>
     <div class="cell actions">${actionsCell(a)}</div>
+    ${open?proxyPanelHtml(a):''}
+    ${usageOpen.has(a.id)?usagePanelHtml(a):''}
   </div>`;
+}
+
+/* ── 用量面板（magpie 风格）：按重置周期聚合额度窗口 ──
+   每行：周期徽章 + 进度条 + 已用/总量 · 已用 % + 重置倒计时。
+   多张同周期卡（领取的赠送卡）聚合成一行，标题栏报「N 张每周重置卡」。 */
+const usageOpen=new Set();
+function toggleUsage(id){
+  if(usageOpen.has(id))usageOpen.delete(id);else usageOpen.add(id);
+  renderList(true);
+}
+const PERIOD_LABEL={daily:'每日',weekly:'每周',monthly:'每月',one_time:'一次性'};
+function usagePanelData(a){
+  const now=Date.now()/1000;
+  const ents=allEntitlements(a);
+  const wins=Object.entries(a.quota||{}).map(([k,w])=>({...w,_name:k}));
+  // 窗口分两类（对齐 magpie 卡片形态）：
+  //   赠送卡 —— show_name 能对上 plan entitlement → 按周期聚合成一行「N 张 X 重置卡」；
+  //   主窗口 —— 对不上任何 entitlement 的 billing balance（主套餐本身）→ 逐窗一行。
+  // 周期取 entitlement 的 period；主窗口按 expires_at 距离粗分（8 天内按每周）。
+  wins.forEach(w=>{
+    const e=ents.find(e=>e.show_name===w._name);
+    w._used=Number(w.used)||0;w._total=Number(w.total)||0;
+    w._exp=Number(w.expires_at)||0;
+    if(e){
+      w._card=true;
+      w._label=PERIOD_LABEL[String(e.period||'').toLowerCase()]||String(e.period||'窗口');
+    }else{
+      w._card=false;
+      const exp=Number(w.expires_at)||0;
+      const span=exp>now?exp-now:0;
+      w._label=span>0&&span<=8*86400?'每周':(exp>0?'周期卡':'窗口');
+    }
+  });
+  // Coding 平面快照并入面板：同窗口多卡（领取的赠送卡）聚合成一行「N 张X重置卡」
+  const now2=Date.now()/1000;
+  const cGroups={};
+  ((a.coding||{}).items||[]).forEach(it=>{
+    const w=String(it.window||'窗口');
+    (cGroups[w]||=[]).push(it);
+  });
+  const codingRows=Object.entries(cGroups).map(([w,items])=>{
+    const total=items.reduce((s,it)=>s+(Number(it.total)||0),0);
+    const used=items.reduce((s,it)=>s+(Number(it.used)||0),0);
+    const live=items.map(it=>Number(it.reset_ms)||0).filter(x=>x*1000>Date.now());
+    const reset=live.length?fmtDur(Math.min(...live)/1000-now2)+'后重置':(items[0].reset||null);
+    return {label:w,count:items.length,name:items[0].name,used,total,
+      pct:total>0?Math.min(100,used/total*100):0,
+      reset,_coding:true};
+  });
+  const agg=(label,ws)=>({
+    label,count:ws.length,used:ws.reduce((s,w)=>s+w._used,0),
+    total:ws.reduce((s,w)=>s+w._total,0),
+    expSoon:ws.some(w=>w._exp>now),
+    reset:(()=>{const live=ws.filter(w=>w._exp>now);return live.length?fmtDur(Math.min(...live.map(w=>w._exp))-now):null;})(),
+  });
+  const out=[];
+  const cards=wins.filter(w=>w._card);
+  if(cards.length)out.push(agg(cards[0]._label,cards));
+  wins.filter(w=>!w._card).forEach(w=>{
+    out.push({...agg(w._label,[w]),solo:true,name:w._name});
+  });
+  return out.concat(codingRows);
+}
+function usagePanelHtml(a){
+  const rows=usagePanelData(a);
+  const weekly=rows.find(r=>r.label==='每周');
+  // 重置卡 chip：官方 /reset/status 真实计数（5小时+每周）优先；
+  // 无计数时回落套餐规格（档位映射），再回落上游窗口数
+  const cSpec=(a.coding||{});
+  const rc=cSpec.reset_credits||null;
+  const specCards=Number(cSpec.weekly_cards)||0;
+  // 官方计数存在时两类卡都展示（含 0 张，与 jusage/zsw 口径一致）
+  const parts=[];
+  if(rc){ parts.push((Number(rc.five_hour)||0)+' 张 5 小时重置卡'); parts.push((Number(rc.weekly)||0)+' 张每周重置卡'); }
+  const chipTxt=parts.length?parts.join(' · '):(specCards>0?specCards+' 张每周重置卡':((weekly&&weekly.count>=1)?weekly.count+' 张每周重置卡':''));
+  const chipTitle=rc?'官方 /reset/status 实时计数（每张卡自带到期时间）':(specCards>0?`${esc(cSpec.tier||'')} 档套餐规格`:'按上游窗口数');
+  const cards=chipTxt?`<span class="up-cards" title="${chipTitle}">🔄 ${chipTxt}</span>`:'';
+  // 到期时间：每类卡取最近到期的一张
+  let expTxt='';
+  if(rc){
+    const fmtMs=ms=>{const d=new Date(ms);const p=n=>String(n).padStart(2,'0');return `${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;};
+    const seg=[];
+    if((Number(rc.five_hour)||0)>0&&Number(rc.five_hour_next)>0)seg.push(`5小时卡 ${fmtMs(rc.five_hour_next)}`);
+    if((Number(rc.weekly)||0)>0&&Number(rc.weekly_next)>0)seg.push(`每周卡 ${fmtMs(rc.weekly_next)}`);
+    if(seg.length)expTxt=seg.join(' · ');
+  }
+  const expChip=expTxt?`<span class="up-cards" style="color:var(--ink-mute);background:var(--panel);border-color:var(--hairline)" title="各类卡中最近到期的一张（官方 /reset/status）">⏳ ${esc(expTxt)}</span>`:'';
+  if(!rows.length)return `<div class="usage-panel"><div class="usage-panel-title">📊 用量面板</div><div class="up-empty">暂无额度窗口数据，点右上角「刷新额度」或发起一次请求</div></div>`;
+  void 0;
+  const body=rows.map(r=>{
+    const color=r.pct>=90?'var(--red)':(r.pct>=60?'var(--amber)':'var(--mint)');
+    const pctTxt=r.pct>=10?Math.round(r.pct)+'%':r.pct.toFixed(1)+'%';
+    return `<div class="up-row">
+      <span class="up-period" title="${esc(r.name||r.label)} · ${r.count} 个窗口">${esc(r.label)}${r.count>1?' ×'+r.count:''}</span>
+      <span class="up-bar" title="${esc(r.label)} · ${r.count} 个窗口聚合"><i style="width:${r.pct.toFixed(1)}%;background:${color}"></i></span>
+      <span class="up-val">${fmtNum(r.used)} / ${fmtNum(r.total)} <span class="up-pct">· 已用 ${pctTxt}</span></span>
+      <span class="up-reset">${r._coding?(r.reset?'重置 '+esc(r.reset):'—'):(r.reset?esc(r.reset)+'后重置':'无重置信息')}</span>
+    </div>`;
+  }).join('');
+  return `<div class="usage-panel">
+    <div class="usage-panel-title">📊 用量面板 ${cards}${expChip}<span style="font-weight:400;color:var(--ink-mute)">（同周期多卡已聚合 · 数据来自最近一次额度刷新）</span></div>
+    ${body}
+  </div>`;
+}
+
+/* ── 账号级出站代理：点击行内地球按钮展开/收起 ── */
+const proxyOpen=new Set();
+function toggleProxy(id){
+  if(proxyOpen.has(id))proxyOpen.delete(id);else proxyOpen.add(id);
+  renderList(true);
+}
+// 点「并发 N」徽章：展开面板并聚焦并发输入框
+function editConc(id){
+  proxyOpen.add(id);
+  renderList(true);
+  setTimeout(()=>{const el=document.getElementById('conc-input-'+id);if(el){el.focus();el.select();}},80);
+}
+function proxyPanelHtml(a){
+  return `<div class="proxy-panel">
+    <div class="proxy-panel-hd">⚡ 出站代理 / 并发 <span style="font-weight:400;color:var(--ink-mute)">（代理留空 = 跟随全局配置 / 直连）</span></div>
+    <input class="input proxy-input" id="proxy-input-${a.id}" style="width:100%;max-width:640px" placeholder="http://user:pass@host:port 或 socks5://user:pass@host:port（粘贴多条自动拆分填充）" value="${esc(a.proxy||'')}" onkeydown="if(event.key==='Enter')saveProxy('${a.id}')" onpaste="proxyInputPaste(event,'${a.id}')">
+    <div class="proxy-panel-body">
+      <label style="font-size:12px;color:var(--ink-mute);white-space:nowrap">并发</label>
+      <input class="input proxy-input" id="conc-input-${a.id}" type="number" min="0" step="1" style="width:96px;flex:none" title="该账号网关并发上限；0 = 不限" value="${a.concurrency==null?1:Number(a.concurrency)}" onkeydown="if(event.key==='Enter')saveProxy('${a.id}')">
+      <button class="dialog-btn dialog-btn-primary" style="flex:none" onclick="saveProxy('${a.id}')">保存</button>
+      <button class="dialog-btn" style="flex:none" onclick="clearProxy('${a.id}')">清除代理</button>
+    </div>
+    <div class="dialog-help">代理：http/https/socks5(h) 可带账号密码，保存后该账号全部上游请求与验证码走新出口；并发：该账号同时在飞的请求数上限，默认 1，0 = 不限</div>
+  </div>`;
+}
+async function saveProxy(id){
+  const el=document.getElementById('proxy-input-'+id);if(!el)return;
+  try{
+    await api('PUT','/accounts/'+id,{proxy:el.value.trim()});
+    showToast('代理已保存','success');load();
+  }catch(e){showToast('保存失败: '+e.message,'error');}
+}
+
+/* 粘贴多条代理：自动识别 → 拆分 → 从当前账号起按列表顺序逐个填充保存。
+   识别形态：socks5(h)://…、http(s)://…、user:pass@host:port、host:port、host:port:user:pass；
+   分隔符：换行 / 空格 / 逗号 / 分号 / 竖线。单个时照常粘贴不拦截。 */
+function parseProxyList(text){
+  const out=[],seen=new Set();
+  String(text||'').split(/[\s,;|]+/).map(x=>x.trim()).filter(Boolean).forEach(tok=>{
+    let p=tok;
+    if(!p.includes('://')){
+      const m=p.match(/^([^:@]+):(\d{2,5}):([^:@]+):(.+)$/);       // host:port:user:pass
+      if(m)p=`http://${m[3]}:${m[4]}@${m[1]}:${m[2]}`;
+      else if(p.includes('@'))p='http://'+p;                          // user:pass@host:port
+      else if(/^[^[\]:]+:\d{2,5}$/.test(p))p='http://'+p;           // host:port
+      else return;                                                    // 不认识的形态跳过
+    }
+    if(!/^(https?|socks5h?):\/\//i.test(p))return;
+    if(seen.has(p))return;seen.add(p);out.push(p);
+  });
+  return out;
+}
+function proxyInputPaste(ev,id){
+  const text=(ev.clipboardData&&ev.clipboardData.getData('text'))||'';
+  const list=parseProxyList(text);
+  if(list.length<=1)return; // 单条：走默认粘贴
+  ev.preventDefault();
+  const idx=allAccounts.findIndex(a=>a.id===id);
+  if(idx<0)return;
+  const targets=allAccounts.slice(idx); // 从当前账号起按列表顺序
+  (async()=>{
+    let filled=0,fail=0;
+    for(let i=0;i<targets.length&&i<list.length;i++){
+      try{await api('PUT','/accounts/'+targets[i].id,{proxy:list[i]});filled++;}
+      catch(e){fail++;showToast(targets[i].name+' 填充失败: '+e.message,'error');}
+    }
+    const extra=list.length-targets.length;
+    showToast(`识别到 ${list.length} 个代理：已按顺序填充 ${filled} 个账号${fail?`，失败 ${fail}`:''}${extra>0?`，多余 ${extra} 个丢弃`:''}`,'success');
+    load();
+  })();
+}
+function clearProxy(id){
+  const el=document.getElementById('proxy-input-'+id);if(el)el.value='';
+  saveProxy(id);
 }
 
 function quotaCell(a){
@@ -393,6 +626,17 @@ function quotaCell(a){
   // 活动额度（plan.entitlements）：
   // ① one_time 已生效 —— billing/balance 不体现这类一次性赠送，单独渲染「活动赠送」行
   // ② 待生效（effective_at 在未来）—— 斜纹流动条，过点自动转正
+  // Coding 平面快照（monitor 端点）：billing 之外的另一本账，逐条渲染
+  const coding=(a.coding||{}).items||[];
+  coding.forEach(it=>{
+    const total=Number(it.total)||0,used=Number(it.used)||0;
+    const pct=Number(it.pct)||(total>0?Math.min(100,used/total*100):0);
+    rows.push(`<div class="quota-row">
+      <span class="quota-row-name" title="Coding 平面 · ${esc(it.window||'')} · 重置 ${esc(it.reset||'—')}">Coding·${esc((it.name||'').replace(/（.*）$/,''))}</span>
+      <span class="quota-row-track"><span class="quota-row-fill" style="width:${Math.min(100,pct).toFixed(1)}%;background:${pct>=90?'var(--red)':(pct>=60?'var(--amber)':'var(--mint)')}"></span></span>
+      <span class="quota-row-val"><span>${fmtNum(used)} / ${fmtNum(total)}</span><span class="quota-row-exp" title="下次重置">${esc(it.reset||'—')}</span></span>
+    </div>`);
+  });
   const now=Date.now()/1000;
   const ents=allEntitlements(a);
   ents.filter(e=>{
@@ -733,14 +977,41 @@ async function doExport(){
   }catch(e){showToast('导出失败: '+e.message,'error');}
 }
 function openImport(){document.getElementById('import-file').click();}
+let _importText='';
 async function onImportFile(ev){
   const file=ev.target.files?.[0];if(!file)return;
-  try{
-    const payload=JSON.parse(await file.text());
-    const d=await api('POST','/import',payload);
-    showToast(`导入 ${d.count} 个账号`,'success');load();
-  }catch(e){showToast('导入失败: '+e.message,'error');}
+  let text='';
+  try{text=await file.text();}
+  catch(e){showToast('读取失败: '+e.message,'error');ev.target.value='';return;}
   ev.target.value='';
+  let doc=null;
+  try{doc=JSON.parse(text);}catch(e){showToast('文件不是有效 JSON: '+e.message,'error');return;}
+  // .zsb 加密封包（kdf+cipher 同时存在）：弹密码框再提交
+  if(doc&&doc.kdf&&doc.cipher){
+    _importText=text;
+    document.getElementById('import-pw-input').value='';
+    const n=(Array.isArray(doc.accounts)?doc.accounts.length:null);
+    document.getElementById('import-pw-hint').textContent=`「${file.name}」是 .zsb 加密封包${n!==null?`（含 ${n} 个账号）`:''}，请输入导出时设置的密码：`;
+    openModal('modal-import-pw');
+    setTimeout(()=>document.getElementById('import-pw-input').focus(),60);
+    return;
+  }
+  await submitImport(text,null);
+}
+async function doImportWithPassword(){
+  const pw=document.getElementById('import-pw-input').value;
+  if(!pw)return showToast('请输入密码','error');
+  closeModal('modal-import-pw');
+  const text=_importText;_importText='';
+  await submitImport(text,pw);
+}
+async function submitImport(content,password){
+  try{
+    const d=await api('POST','/import',password?{content,password}:{content});
+    const added=(d.added!=null)?d.added:d.count;
+    const msg=d.skipped?`新增 ${added} 个，重复跳过 ${d.skipped} 个`:`导入 ${added} 个账号`;
+    showToast(msg,'success');load();
+  }catch(e){showToast('导入失败: '+e.message,'error');}
 }
 
 /* ── Helpers ── */

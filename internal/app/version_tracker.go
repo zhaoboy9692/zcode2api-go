@@ -230,7 +230,7 @@ func (t *VersionTracker) InitFromStore() {
 // env 代理（127.0.0.1:10822）2026-11-04 实测完全超时（15s HTTP 000），
 // 直连才是可用出口——与 claim/billing 链路同出口策略。
 func (t *VersionTracker) FetchRemoteManifest() *VersionInfo {
-	client := &http.Client{Timeout: 15 * time.Second, Transport: directTransport()}
+	client := &http.Client{Timeout: 15 * time.Second, Transport: upstreamTransport()}
 	req, err := http.NewRequest(http.MethodGet, ZCODE_MANIFEST_URL, nil)
 	if err != nil {
 		LogWarn("version", fmt.Sprintf("查询官方版本 manifest 异常: %v", err))

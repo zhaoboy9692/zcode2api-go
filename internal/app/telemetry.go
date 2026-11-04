@@ -61,14 +61,19 @@ func TelemetryBusinessCode(body any) int {
 	return -1
 }
 
-// telemetryHTTPClient trust_env=False 直连（与 Python 注释同语义：不用环境代理）。
-func telemetryHTTPClient(timeout time.Duration) *http.Client {
+// telemetryHTTPClient trust_env=False 直连（与 Python 注释同语义：不用环境代理）；
+// 该账号生效的显式代理（账号级 > 全局）时跟随（与 claim/install 同出口，见 proxy.go）。
+func telemetryHTTPClient(timeout time.Duration, account *Account) *http.Client {
+	t := &http.Transport{
+		// trust_env=False：直连，忽略 HTTP_PROXY 等环境变量
+		Proxy: nil,
+	}
+	if raw := ProxyRawForAccount(account); raw != "" {
+		t.Proxy = ProxyFuncForRaw(raw)
+	}
 	return &http.Client{
-		Timeout: timeout,
-		Transport: &http.Transport{
-			// trust_env=False：直连，忽略 HTTP_PROXY 等环境变量
-			Proxy: nil,
-		},
+		Timeout:   timeout,
+		Transport: t,
 	}
 }
 
@@ -82,7 +87,7 @@ func telemetryHTTPClient(timeout time.Duration) *http.Client {
 // 走美国出口被拒 unusual activity」，且 hub 进程 env 代理（127.0.0.1:10822）
 // 当晚完全超时（curl 15s HTTP 000），激活上报逐轮 ConnectTimeout/ReadTimeout
 // → 上游收不到当日活跃信号 → marketing/touch 恒空 → 自动领取全天空转。
-func PostActivationEvent(profile DeviceProfile, userID, element string, timeout time.Duration) error {
+func PostActivationEvent(account *Account, profile DeviceProfile, userID, element string, timeout time.Duration) error {
 	if timeout == 0 {
 		timeout = telemetryTimeout * time.Second
 	}
@@ -90,7 +95,7 @@ func PostActivationEvent(profile DeviceProfile, userID, element string, timeout 
 	if err != nil {
 		return err
 	}
-	client := telemetryHTTPClient(timeout)
+	client := telemetryHTTPClient(timeout, account)
 	resp, err := client.Post(ZCODE_EVENT_REPORT_URL, "application/json", bytes.NewReader(bodyBytes))
 	if err != nil {
 		return err

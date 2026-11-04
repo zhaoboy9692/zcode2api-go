@@ -179,8 +179,6 @@ var (
 	RISK_BAN_STRIKES         int  // 窗口内累计命中达到即禁用
 	RISK_STRIKE_DECAY_SECONDS int // 距上次风控命中超过该窗口则 strikes 重新起算
 	RISK_AUTO_ROTATE         bool // 风控升级禁用时自动换发设备指纹并后台补跑安装序
-	// 单账号并发上限（0 = 不限）。默认 2；运行期可在后台设置改（meta 表即时生效）
-	ACCOUNT_CONCURRENCY int
 	// 套餐自动领取轮间隔（秒）：周期对全部可打 billing 的 JWT 账号轮一遍
 	// preview + 领取（有可领套餐才补激活上报，见 claim.auto_claim_all_plans）。
 	// 默认 3600（2.6.5 整改）。0 = 关闭轮次，仅入池/手动触发。
@@ -291,7 +289,6 @@ func init() {
 	RISK_BAN_STRIKES = intEnv("ZCODE_RISK_BAN_STRIKES", 4)
 	RISK_STRIKE_DECAY_SECONDS = intEnv("ZCODE_RISK_STRIKE_DECAY_SECONDS", 7*86400)
 	RISK_AUTO_ROTATE = boolEnv("ZCODE_RISK_AUTO_ROTATE", true)
-	ACCOUNT_CONCURRENCY = intEnv("ZCODE_ACCOUNT_CONCURRENCY", 2)
 	CLAIM_ROUND_INTERVAL = intEnv("ZCODE_CLAIM_ROUND_INTERVAL", 3600)
 	CLAIM_ROUND_HOURS = os.Getenv("ZCODE_CLAIM_ROUND_HOURS")
 	if CLAIM_ROUND_HOURS == "" {

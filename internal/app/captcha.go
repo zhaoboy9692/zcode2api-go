@@ -28,12 +28,20 @@ import (
 	"time"
 )
 
-// httpTimeoutClient 构造 httpx.AsyncClient(timeout, trust_env) 等价客户端。
-func httpTimeoutClient(timeout time.Duration, trustEnv bool) *http.Client {
+// httpTimeoutClientForTag 按出口标签构造客户端：
+//   - "direct"：直连；
+//   - "proxy"：env 语义（trust_env=True，跟随 HTTP_PROXY/NO_PROXY）；
+//   - 其他：显式代理 URL 作为标签身份（账号级/全局 ZCODE_UPSTREAM_PROXY），
+//     固定走该代理（NO_PROXY 仍生效），保证与真实请求同出口。
+func httpTimeoutClientForTag(timeout time.Duration, tag string) *http.Client {
 	t := &http.Transport{}
-	if trustEnv {
-		// trust_env=True：跟随 HTTP_PROXY/NO_PROXY 环境变量
+	switch {
+	case tag == EgressDirect:
+		// 直连
+	case tag == EgressProxy:
 		t.Proxy = http.ProxyFromEnvironment
+	default:
+		t.Proxy = ProxyFuncForRaw(tag)
 	}
 	return &http.Client{Timeout: timeout, Transport: t}
 }
@@ -103,7 +111,7 @@ func (m *CaptchaManager) HotEgress() string {
 	if forced != "" {
 		return forced
 	}
-	return EgressFor(UPSTREAM["zai"])
+	return EgressTagForAccount(nil)
 }
 
 func (m *CaptchaManager) size(tag string) int {
@@ -156,9 +164,9 @@ func (m *CaptchaManager) FetchConfig(egressTag string) (map[string]any, error) {
 	return CaptchaDefaults(), nil
 }
 
-// fetchCaptchaConfigHTTP httpx (timeout=30, trust_env=tag==PROXY) 拉取 configs。
+// fetchCaptchaConfigHTTP 按出口标签拉取 configs（与签发/使用同出口）。
 func fetchCaptchaConfigHTTP(tag string) (map[string]any, error) {
-	client := httpTimeoutClient(30*time.Second, tag == EgressProxy)
+	client := httpTimeoutClientForTag(30*time.Second, tag)
 	res, err := client.Get(CLIENT_CONFIGS_URL + "?" + ClientConfigsQuery())
 	if err != nil {
 		return nil, err
@@ -520,10 +528,20 @@ func (m *CaptchaManager) runSolver(scene, region, prefix, tag string) (string, e
 			cleaned = append(cleaned, kv)
 		}
 	}
-	if tag == EgressProxy {
-		proxy := ProxyURL("")
+	if tag != EgressDirect {
+		// 浏览器形态代理（BrowserFormForRaw）：socks5+凭据 → 本地免鉴权中继；
+		// http(s) → 剥离 userinfo（凭据由 solver 用 page.authenticate 回填）。
+		proxy := ""
+		if tag == EgressProxy {
+			proxy = BrowserProxyRaw() // env 语义：取 env 归一后的浏览器形态
+			if proxy == "" {
+				proxy = ProxyURL("")
+			}
+		} else {
+			proxy = BrowserFormForRaw(tag) // 显式代理 URL 标签
+		}
 		if proxy == "" {
-			return "", fmt.Errorf("请求走代理但 env 未配置代理地址，无法对齐验证码出口")
+			return "", fmt.Errorf("请求走代理但未配置代理地址，无法对齐验证码出口")
 		}
 		cleaned = append(cleaned, "HTTP_PROXY="+proxy, "HTTPS_PROXY="+proxy)
 	}
