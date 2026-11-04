@@ -206,7 +206,10 @@
 .up-pct{color:var(--ink-mute)}
 .up-reset{color:var(--ink-mute);white-space:nowrap;min-width:86px;text-align:right}
 .up-empty{font-size:12px;color:var(--ink-mute)}
-.proxy-badge{display:inline-flex;align-items:center;font-size:10px;padding:1px 6px;border-radius:999px;background:rgba(56,189,248,.12);color:#38bdf8;border:1px solid rgba(56,189,248,.25);font-weight:600;margin-left:6px;white-space:nowrap}
+.proxy-badge{display:inline-flex;align-items:center;font-size:10px;padding:1px 6px;border-radius:999px;background:rgba(56,189,248,.12);color:#38bdf8;border:1px solid rgba(56,189,248,.25);font-weight:600;margin-left:6px;white-space:nowrap;flex:none}
+/* 凭证行防裁切：token 收缩打省略号，徽章永不收缩；空间不足时徽章换行而不是被 overflow 裁掉 */
+.cred-sub{flex-wrap:wrap}
+.cred-sub .tok{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .acct-row.is-open .cell.cred{opacity:.92}
 .proxy-panel{grid-column:1/-1;padding:10px 14px 12px;border-top:1px dashed var(--hairline);background:var(--panel-2);display:grid;gap:8px}
 .proxy-panel-hd{font-size:12px;font-weight:600;color:var(--ink);display:flex;align-items:center;gap:6px}
@@ -435,7 +438,7 @@ function rowHtml(a){
    多张同周期卡（领取的赠送卡）聚合成一行，标题栏报「N 张每周重置卡」。 */
 const usageOpen=new Set();
 function toggleUsage(id){
-  if(usageOpen.has(id))usageOpen.delete(id);else usageOpen.add(id);
+  if(usageOpen.has(id))usageOpen.delete(id);else{usageOpen.add(id);panelIntoView(id);}
   renderList(true);
 }
 const PERIOD_LABEL={daily:'每日',weekly:'每周',monthly:'每月',one_time:'一次性'};
@@ -536,13 +539,25 @@ function usagePanelHtml(a){
 /* ── 账号级出站代理：点击行内地球按钮展开/收起 ── */
 const proxyOpen=new Set();
 function toggleProxy(id){
-  if(proxyOpen.has(id))proxyOpen.delete(id);else proxyOpen.add(id);
+  if(proxyOpen.has(id))proxyOpen.delete(id);else{proxyOpen.add(id);panelIntoView(id);}
   renderList(true);
+}
+// 面板展开后滚到固定顶栏(54px)之下,避免被悬浮顶栏遮住(矮窗口滚动时尤其明显)
+function panelIntoView(id){
+  setTimeout(()=>{
+    const row=document.querySelector(`.acct-row[data-id="${id}"]`);
+    if(!row)return;
+    const p=row.querySelector('.proxy-panel,.usage-panel');
+    if(!p)return;
+    const y=p.getBoundingClientRect().top+window.scrollY-70;
+    if(Math.abs(window.scrollY-y)>8)window.scrollTo({top:Math.max(0,y),behavior:'smooth'});
+  },60);
 }
 // 点「并发 N」徽章：展开面板并聚焦并发输入框
 function editConc(id){
   proxyOpen.add(id);
   renderList(true);
+  panelIntoView(id);
   setTimeout(()=>{const el=document.getElementById('conc-input-'+id);if(el){el.focus();el.select();}},80);
 }
 function proxyPanelHtml(a){
