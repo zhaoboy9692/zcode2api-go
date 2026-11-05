@@ -207,13 +207,6 @@ func FetchQuota(account *Account) map[string]any {
 		if !strings.Contains(body, "captcha") && !strings.Contains(body, "verify") {
 			account.Status = StatusInvalid
 			account.LastError = AuthExpiredMessage
-			// Coding 平面快照：有 API Key 的账号顺带拉一次 monitor（bigmodel 账号的主账本）
-			if account.APIKey != "" {
-				if res := FetchCodingLimits(account); res["error"] == nil {
-					// snapshot 已写入 account.CodingLimits
-				}
-			}
-
 			DefaultStore.UpdateAccount(account)
 			return map[string]any{"error": account.LastError}
 		}
@@ -455,6 +448,12 @@ func FetchQuota(account *Account) map[string]any {
 		}
 	}
 
+	// Coding 平面快照：有 API Key 且本次确实拿到有效账本数据的账号，顺带拉一次
+	// monitor（bigmodel 账号的主账本）。只在正常返回路径，鉴权失败/无效账号不打。
+	if account.APIKey != "" && account.Status != StatusInvalid && account.Status != StatusDisabled &&
+		(len(quotaMap) > 0 || result["billing"] != nil) {
+		_ = FetchCodingLimits(account)
+	}
 	DefaultStore.UpdateAccount(account)
 	// 「三路全业务错误」才整体报失败（调用方据此区分「上游拒绝」与「上游确实
 	// 什么都没有」）。一路成功就照常返回，错误只记日志——避免把「部分可用」

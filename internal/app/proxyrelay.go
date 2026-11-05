@@ -25,6 +25,7 @@ var (
 	relayMu       sync.Mutex
 	relayAddr     string // 已启动中继的 "socks5://127.0.0.1:port"；空 = 未启动
 	relayUpstream *url.URL
+	relayListener net.Listener // 旧 listener：换代理时关闭，避免端口/goroutine 泄漏
 )
 
 // ensureSocksAuthRelay 启动（幂等）本地免鉴权 SOCKS5 中继，返回其代理 URL。
@@ -34,10 +35,15 @@ func ensureSocksAuthRelay(upstream *url.URL) (string, error) {
 	if relayAddr != "" && relayUpstream != nil && relayUpstream.String() == upstream.String() {
 		return relayAddr, nil
 	}
+	if relayListener != nil { // 上游代理换配：先关旧监听（其 Accept 循环随之退出）
+		_ = relayListener.Close()
+		relayListener = nil
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", err
 	}
+	relayListener = ln
 	go func() {
 		for {
 			conn, err := ln.Accept()
