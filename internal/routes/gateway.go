@@ -913,7 +913,10 @@ func (s *Server) dispatch(reqID string, body map[string]any, incomingHeaders map
 	if et, _ := errDict["type"].(string); et != "no_available_account" {
 		return res
 	}
+	// 注意：dispatchProvider 的「无可用账号」收尾不落监控定稿（见其尾注），
+	// 定稿权在本层 —— 否则自动路由换家成功后，监控里还挂着第一遍的 503。
 	if !app.DefaultStore.AutoRouteEnabled() {
+		app.ReqLogFinishError(reqID, "无可用账号 / 额度均已耗尽 / 并发已满", app.IntPtr(503), nil)
 		return res // 开关关闭：只按显式前缀/请求头路由，不跨家降级
 	}
 	other := "bigmodel"
@@ -922,8 +925,12 @@ func (s *Server) dispatch(reqID string, body map[string]any, incomingHeaders map
 	}
 	if other != provider && app.DefaultStore.HasSelectable(other) {
 		app.LogInfo("gateway", fmt.Sprintf("自动路由：%s 无可用账号，切到 %s 重试", provider, other))
-		return s.dispatchProvider(reqID, body, incomingHeaders, other, r)
+		res = s.dispatchProvider(reqID, body, incomingHeaders, other, r)
+		if !(res.kind == kindJSON && res.json != nil && res.json.status == 503) {
+			return res // 换家成功（或换成另一种业务错误）：正常收尾
+		}
 	}
+	app.ReqLogFinishError(reqID, "无可用账号 / 额度均已耗尽 / 并发已满", app.IntPtr(503), nil)
 	return res
 }
 
@@ -977,8 +984,9 @@ func (s *Server) dispatchProvider(reqID string, body map[string]any, incomingHea
 		return result
 	}
 
+	// 监控不定稿：自动路由换家重试可能在本 provider 无号后于另一家成功，
+	// 定稿权上收 dispatch 包装层（仅最终 503 才落一条失败）。
 	app.LogReqErr(reqID, "无可用账号 / 额度均已耗尽 / 并发已满")
-	app.ReqLogFinishError(reqID, "无可用账号 / 额度均已耗尽 / 并发已满", app.IntPtr(503), nil)
 	return &dispatchResult{kind: kindJSON, json: &JSONResponse{status: 503, body: noAvailableAccountBody()}}
 }
 
