@@ -211,8 +211,8 @@ function renderLive(){
       <span class="mon-num">${fmtTok(e.input_tokens)}</span>
       <span class="mon-num">${fmtTok(e.output_tokens)}</span>
       <span class="mon-preview">
-        <span title="${esc(e.preview||'')}">${esc(e.preview||'—')}</span>${e.stream?' <span class="mon-stream">流</span>':''}
-        ${e.ok===false&&e.error?`<span class="err-line" style="display:block" title="${esc(e.error)}">⚠ ${esc(e.error)}</span>`:''}
+        <span class="tip-host" data-tip="${esc('内容预览：\n'+(e.preview||'(空)'))}">${esc(e.preview||'—')}</span>${e.stream?' <span class="mon-stream">流</span>':''}
+        ${e.ok===false&&e.error?`<span class="err-line tip-host" style="display:block" data-tip="${esc('错误详情：\n'+e.error)}">⚠ ${esc(e.error)}</span>`:''}
       </span>
     </div>`).join('');
   $('list').innerHTML=filtered().length?`<div class="acct-table">${head}${body}</div>`:`<div class="empty-state">所选时间范围内没有请求</div>`;
@@ -235,6 +235,32 @@ function setRange(v){state.range=v;renderChips();render();}
 function setTab(t){tab=t;document.querySelectorAll('.mon-tab').forEach(b=>b.classList.toggle('active',b.dataset.tab===t));render();}
 function onSearch(v){state.q=v;render();}
 function onStatus(v){state.status=v;render();}
+
+// 自定义悬浮层:原生 title 在 5s 轮询重渲染下永远来不及显示,
+// 改为 document 级 mouseover 委托 + fixed 浮层(账号页 tickTip 同款)
+(function(){
+  let tip=document.getElementById('monTip');
+  if(!tip){tip=document.createElement('div');tip.id='monTip';tip.className='tick-tip';document.body.appendChild(tip);}
+  function hide(){tip.classList.remove('show');}
+  document.addEventListener('mouseover',e=>{
+    const t=e.target&&e.target.closest?e.target.closest('.tip-host'):null;
+    if(!t){hide();return;}
+    const raw=t.dataset.tip||'';
+    const nl=raw.indexOf('\n');
+    const head=nl<0?raw:raw.slice(0,nl), body=nl<0?'':raw.slice(nl+1);
+    tip.innerHTML=`<span class="tt-head">${esc(head)}</span>`+(body?`<span class="tt-body" style="display:block;color:var(--ink-mute);white-space:pre-wrap;word-break:break-all">${esc(body)}</span>`:'');
+    tip.classList.add('show');
+    tip.style.left='0px';tip.style.top='0px';
+    const r=t.getBoundingClientRect(), tw=tip.offsetWidth, th=tip.offsetHeight;
+    let x=r.left+r.width/2-tw/2;
+    x=Math.max(8,Math.min(x,window.innerWidth-tw-8));
+    let y=r.top-th-10;
+    if(y<8)y=r.bottom+10;
+    tip.style.left=x+'px';tip.style.top=y+'px';
+  });
+  window.addEventListener('scroll',hide,true);
+  window.addEventListener('blur',hide);
+})();
 
 async function load(){
   const res=await api('GET','/monitoring');

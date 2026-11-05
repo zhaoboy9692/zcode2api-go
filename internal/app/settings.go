@@ -259,7 +259,9 @@ func init() {
 	CAPTCHA_CONFIG_CACHE_TTL = intEnv("CAPTCHA_CONFIG_CACHE_TTL", 600_000)
 
 	NODE_PATH = envOr("ZCODE_NODE_PATH", "node")
-	CAPTCHA_SOLVER_DIR = filepath.Join(mustRoot(), "captcha_node")
+	// snap Chromium 沙箱只读 $HOME:部署在 /opt 等路径时,可用 env 把求解器目录
+	// 指到 $HOME 下(含 page.html,snap 才能加载)
+	CAPTCHA_SOLVER_DIR = envOr("ZCODE_CAPTCHA_SOLVER_DIR", filepath.Join(mustRoot(), "captcha_node"))
 	CAPTCHA_SOLVER_MODE = strings.ToLower(strings.TrimSpace(envOr("ZCODE_CAPTCHA_SOLVER", "pw")))
 	if CAPTCHA_SOLVER_MODE == "" {
 		CAPTCHA_SOLVER_MODE = "pw"
