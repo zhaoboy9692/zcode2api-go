@@ -205,26 +205,6 @@ go test ./...         # 全量单元测试（无真实网络）
 幂等与三块结构、token 估算口径、OpenAI/Responses 双向转换、YAML 版本号陷阱、
 NO_PROXY 匹配语义、领取窗口（北京时钟）、风控指数退避等。
 
-## Go 版移植对照
-
-| Python（原版） | Go（本仓库） |
-|----------------|--------------|
-| `app/constants.py` | `internal/app/constants.go` |
-| `app/settings.py` | `internal/app/settings.go` |
-| `app/models.py` / `app/store.py` | `internal/app/models.go` / `internal/app/store.go` |
-| `app/fingerprint.py` / `app/hostinfo.py` | 同名 `.go` |
-| `app/identity.py` / `app/egress.go` / `app/telemetry.py` / `app/install.py` | 同名 `.go` |
-| `app/quota.py` / `app/claim.py` / `app/captcha.py` / `app/version_tracker.py` / `app/oauth.py` | 同名 `.go` |
-| `app/body_transform.py` / `app/openai_compat.py` / `app/responses_compat.py` / `app/token_estimate.py` / `app/agent.py` | 同名 `.go` |
-| `app/auth_admin.py` / `app/reqlog.py` / `app/business_error.py` / `app/logs.py` | 同名 `.go` |
-| `app/routes/gateway.py` / `admin_api.py` / `pages.py` | `internal/routes/*.go` |
-| `app/main.py`（FastAPI 工厂 + lifespan） | `internal/routes/server.go` |
-| `cli.py` | `main.go` |
-
-- HTTP 服务：Python FastAPI/Uvicorn → Go `net/http`（1.22+ 方法/路径路由）；asyncio → goroutine。
-- SQLite：语义一致（WAL / synchronous=NORMAL / busy_timeout=5000），驱动为纯 Go 的 `modernc.org/sqlite`，**数据库文件与 Python 版互通**。
-- 运行期配置、meta 表、账号 JSON 序列化字段名与 Python 版逐字段一致。
-
 ## 文档
 
 完整文档见 [`docs/README.md`](docs/README.md)（与原版一致）：
