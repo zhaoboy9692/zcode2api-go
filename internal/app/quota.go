@@ -429,6 +429,30 @@ func FetchQuota(account *Account) map[string]any {
 		if account.UseCount == 0 && account.Status == StatusActive {
 			account.LastError = "billing 为空，待首次请求验证（疑似新号体验额度）"
 		}
+		// 上游账本成功返回但已空（套餐结束/窗口整体消失）：清掉本地已过期的旧
+		// 窗口快照 —— 否则 UI 永远显示早已到期的窗口（如「至 11/05 09:00」挂
+		// 一整天）。只清全部过期的（留 10 分钟时钟余量），活性窗口不动；
+		// 不改 status/LastError，账号生死判定仍走原路径。
+		if len(account.Quota) > 0 {
+			nowF := NowFloat()
+			allExpired := true
+			for _, w := range account.Quota {
+				wm, ok := w.(map[string]any)
+				if !ok {
+					continue
+				}
+				exp, _ := AsFloat(wm["expires_at"])
+				if exp == 0 || exp > nowF-600 {
+					allExpired = false
+					break
+				}
+			}
+			if allExpired {
+				account.Quota = map[string]any{}
+				account.Plans = []any{}
+				account.Plan = map[string]any{}
+			}
+		}
 	}
 
 	DefaultStore.UpdateAccount(account)

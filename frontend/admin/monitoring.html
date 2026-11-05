@@ -210,7 +210,10 @@ function renderLive(){
       <span class="mon-num">${fmtSec(e.t_total)}</span>
       <span class="mon-num">${fmtTok(e.input_tokens)}</span>
       <span class="mon-num">${fmtTok(e.output_tokens)}</span>
-      <span class="mon-preview" title="${esc(e.error||e.preview||'')}">${e.ok===false&&e.error?`<span class="err-line">${esc(e.error)}</span>`:esc(e.preview||'—')}${e.stream?' <span class="mon-stream">流</span>':''}</span>
+      <span class="mon-preview">
+        <span title="${esc(e.preview||'')}">${esc(e.preview||'—')}</span>${e.stream?' <span class="mon-stream">流</span>':''}
+        ${e.ok===false&&e.error?`<span class="err-line" style="display:block" title="${esc(e.error)}">⚠ ${esc(e.error)}</span>`:''}
+      </span>
     </div>`).join('');
   $('list').innerHTML=filtered().length?`<div class="acct-table">${head}${body}</div>`:`<div class="empty-state">所选时间范围内没有请求</div>`;
 }
