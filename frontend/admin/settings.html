@@ -29,7 +29,7 @@
     <div class="settings-row">
       <label>网关 API Key（可选）</label>
       <div class="hint">设置后，调用 <code>/v1/messages</code> 须携带 <code>Authorization: Bearer &lt;key&gt;</code> 或 <code>x-api-key</code>。清空并保存可关闭校验（生产必须配置）。输入框显示掩码，未改动保存不会覆盖原值。</div>
-      <input class="input" id="gateway-key" type="password" placeholder="留空表示不启用" autocomplete="new-password">
+      <input class="input" id="gateway-key" type="password" placeholder="留空表示不启用 / 不修改" autocomplete="off" value="">
     </div>
     <div class="settings-row">
       <label>跨账号商自动路由</label>
@@ -114,7 +114,7 @@ async function load(){
   try{
     const d=await api('GET','/settings');
     document.getElementById('admin-key').value=d.admin_key_masked||'';
-    document.getElementById('gateway-key').value=d.gateway_key_masked||'';
+    document.getElementById('gateway-key').value=''; // 密钥只写不读:留空=不修改
     document.getElementById('auto-route').checked = d.auto_route !== false;
     document.getElementById('quota-interval').value=d.quota_refresh_interval??1800;
     document.getElementById('claim-round-interval').value=d.claim_round_interval??3600;
@@ -215,7 +215,7 @@ async function saveSettings(){
                  auto_route:document.getElementById('auto-route').checked,
                  auto_sync_client_version:document.getElementById('auto-sync-version').checked};
   if(!_isSecretMask(admin_key)) payload.admin_key=admin_key;
-  if(!_isSecretMask(gateway_key)) payload.gateway_key=gateway_key;
+  if(gateway_key && !_isSecretMask(gateway_key)) payload.gateway_key=gateway_key; // 空=不修改
   try{
     await api('PUT','/settings',payload);
     if(payload.admin_key) await adminKey.set(payload.admin_key);
