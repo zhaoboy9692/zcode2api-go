@@ -8,6 +8,20 @@
 > 前端控制台（`frontend/`）、验证码求解器（`captcha_node/`）、文档（`docs/`）与数据格式（`data/accounts.db`）
 > 与原版完全兼容，可直接替换部署。
 
+## 来源项目
+
+本仓库在原版移植之外，还复刻 / 参考了以下开源项目的实现与实证结论（在此致谢）：
+
+| 项目 | 复刻 / 参考内容 |
+|------|----------------|
+| [dengyie/zcode2api](https://github.com/dengyie/zcode2api) | **1:1 移植源**（Python 原版）：全部网关 / 账号池 / 验证码 / 领取 / 后台功能 |
+| [magpie-community/plugins · packages/zcode](https://github.com/magpie-community/plugins/tree/main/packages/zcode) | ZCode **3.17.2 官方提示词资产与 dress 形态**（`zcode_prompt_3172.json` 的出处；2026-11-03 上游按提示词版本指纹判 405/3012 的实证与修复）、`startHeaders` 请求头形态、coding-plan 通道 `x-api-key` + `Bearer` 双头与 `metadata.user_id` 形态 |
+| [yetone/magpie](https://github.com/yetone/magpie) | 喜鹊应用本体：zcode 插件承载形态、账号路由与 usage 卡片交互参考 |
+| [Arimayuki03/magpie-zcode-switch-auth](https://github.com/Arimayuki03/magpie-zcode-switch-auth) | zsw 账号导入 / 活动领取流程参考 |
+| [wjsqqj/zcode-switch](https://github.com/wjsqqj/zcode-switch)（zsw） | **`.zsb` 加密封包格式**（PBKDF2 + AES-256-GCM envelope，见 `docs/development/03-data-formats.md`）与互通语义 |
+| [@juejin-opensource/jusage-core](https://github.com/juejin-cn/juejin-usage)（掘金开源） | `coding-plan/reset/status` 官方重置卡端点（双 token 头）与 monitor 额度窗口的字段映射 |
+| [liu5269/zcode2api](https://github.com/liu5269/zcode2api) | 早期简化形态对照（3.0.1 时代最小头集基线） |
+
 自带一套完整的账号运营控制台：多账号池轮询、高可信成套桌面指纹仿真、官方首启安装序仿真、单账号并发控制、429/5xx/3012 阶梯容灾、请求全景监控、限时套餐自动与手动领取、OAuth 免密登录入池，以及免浏览器的阿里云无痕验证求解——开箱即用，自托管部署。
 
 ---
